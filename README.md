@@ -416,6 +416,8 @@ Run a backup:
 clserver backup survival
 ```
 
+If the target server is running, `backup` stops it, waits for the `screen` session to exit, runs the backup, and then starts it again. Minecraft servers use friendly shutdown for this flow; other server types use their configured `stopCommand`. If the server was already stopped, it is backed up without being started afterward.
+
 Run daily maintenance across the configured fleet:
 
 ```sh

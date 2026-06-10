@@ -80,7 +80,7 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
     match action {
         Action::Start => server.start_server(),
         Action::Stop { stop_type } => server.stop_server(stop_type),
-        Action::Backup => server.manager.backup_server(),
+        Action::Backup => backup_minecraft_server(server),
         Action::Restart => server.restart_server(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
@@ -107,7 +107,7 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
                 server.manager.stop_with_stop_command()
             }
         }
-        Action::Backup => server.manager.backup_server(),
+        Action::Backup => backup_generic_server(&server.manager),
         Action::Restart => server.manager.restart_with_stop_command(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
@@ -115,6 +115,50 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
             no_server_action_unreachable()
         }
     }
+}
+
+fn backup_minecraft_server(server: &MinecraftServer) -> Result<()> {
+    let was_running = server.manager.screen_session_exists()?;
+
+    if was_running {
+        server.stop_server(StopType::Friendly)?;
+        ensure_manager_stopped(&server.manager)?;
+    }
+
+    let backup_result = server.manager.backup_server();
+
+    if was_running && let Err(start_err) = server.start_server() {
+        return match backup_result {
+            Ok(()) => Err(start_err).context("Backup completed, but failed to restart server"),
+            Err(backup_err) => Err(backup_err).context(format!(
+                "Backup failed, and server restart also failed: {start_err:#}"
+            )),
+        };
+    }
+
+    backup_result
+}
+
+fn backup_generic_server(manager: &ServerManager) -> Result<()> {
+    let was_running = manager.screen_session_exists()?;
+
+    if was_running {
+        manager.stop_with_stop_command()?;
+        ensure_manager_stopped(manager)?;
+    }
+
+    let backup_result = manager.backup_server();
+
+    if was_running && let Err(start_err) = manager.start_server() {
+        return match backup_result {
+            Ok(()) => Err(start_err).context("Backup completed, but failed to restart server"),
+            Err(backup_err) => Err(backup_err).context(format!(
+                "Backup failed, and server restart also failed: {start_err:#}"
+            )),
+        };
+    }
+
+    backup_result
 }
 
 fn run_maintenance(config: &mut Config) -> Result<()> {

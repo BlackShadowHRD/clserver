@@ -44,6 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Server table keys now act as command IDs/shortcuts, while `name` is the real server directory and `screen` session name.
 - Server `name` values are now validated as unique; duplicate TOML table IDs are rejected by TOML parsing.
 - `backup` now runs `rsync -av --delete` instead of being a placeholder.
+- `backup <server>` now stops a running server before backup and restarts it afterward.
 
 ### Fixed
 

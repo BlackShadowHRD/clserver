@@ -73,7 +73,10 @@ impl MinecraftServer {
         } else {
             info!(
                 server = %self.manager.config.name,
-                "no players online; performing immediate shutdown instead"
+                player_count,
+                requested_stop = "friendly",
+                effective_stop = "immediate",
+                "no players online during friendly shutdown; skipping warning delay and stopping immediately"
             );
         }
 

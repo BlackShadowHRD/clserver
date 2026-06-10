@@ -11,11 +11,12 @@ pub struct GenericServer {
 
 impl GenericServer {
     pub fn new(
+        server_id: String,
         config: ServerConfig,
         global: &GlobalConfig,
         java_environments: &HashMap<String, String>,
     ) -> Result<Self> {
-        let manager = ServerManager::new(config, global, java_environments)?;
+        let manager = ServerManager::new(server_id, config, global, java_environments)?;
         Ok(Self { manager })
     }
 }

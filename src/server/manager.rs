@@ -11,6 +11,7 @@ use crate::config::{GlobalConfig, ServerConfig, resolve_java_bin};
 use tracing::{debug, error, info, warn};
 
 pub struct ServerManager {
+    pub server_id: String,
     pub config: ServerConfig,
     java_bin: String,
     server_dir: PathBuf,
@@ -19,6 +20,7 @@ pub struct ServerManager {
 
 impl ServerManager {
     pub fn new(
+        server_id: String,
         config: ServerConfig,
         global: &GlobalConfig,
         java_environments: &HashMap<String, String>,
@@ -28,6 +30,7 @@ impl ServerManager {
         let log_dir = global.log_dir.clone();
 
         Ok(Self {
+            server_id,
             config,
             java_bin,
             server_dir,
@@ -195,6 +198,7 @@ impl ServerManager {
             )
         })?;
 
+        println!("ID: {}", self.server_id);
         println!("Server: {}", self.config.name);
         println!("Type: {}", self.config.server_type);
         println!(

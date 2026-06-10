@@ -37,6 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - XDG config and state paths now use `clserver` instead of the legacy short name `cls`:
   - `$XDG_CONFIG_HOME/clserver/clserver.toml`
   - `$XDG_STATE_HOME/clserver/clserver.log`
+- Server table keys now act as command IDs/shortcuts, while `name` is the real server directory and `screen` session name.
+- Server `name` values are now validated as unique; duplicate TOML table IDs are rejected by TOML parsing.
 
 ### Fixed
 

@@ -43,13 +43,21 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
 
     match server_config.server_type {
         ServerType::Minecraft => {
-            let server =
-                MinecraftServer::new(server_config, &config.global, &config.java_environments)?;
+            let server = MinecraftServer::new(
+                server_name.to_string(),
+                server_config,
+                &config.global,
+                &config.java_environments,
+            )?;
             dispatch_minecraft(&server, request.action)
         }
         ServerType::Velocity | ServerType::Hytale => {
-            let server =
-                GenericServer::new(server_config, &config.global, &config.java_environments)?;
+            let server = GenericServer::new(
+                server_name.to_string(),
+                server_config,
+                &config.global,
+                &config.java_environments,
+            )?;
             dispatch_generic(&server, request.action)
         }
     }
@@ -97,12 +105,17 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
 }
 
 fn list_servers(config: &Config) -> Result<()> {
-    let mut servers: Vec<_> = config.servers.values().cloned().collect();
-    servers.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut servers: Vec<_> = config.servers.iter().collect();
+    servers.sort_by(|(a_id, a), (b_id, b)| a_id.cmp(b_id).then_with(|| a.name.cmp(&b.name)));
 
-    println!("{:<24} {:<10} STATUS", "SERVER", "TYPE");
-    for server_config in servers {
-        let manager = ServerManager::new(server_config, &config.global, &config.java_environments)?;
+    println!("{:<16} {:<24} {:<10} STATUS", "ID", "SERVER", "TYPE");
+    for (server_id, server_config) in servers {
+        let manager = ServerManager::new(
+            server_id.clone(),
+            server_config.clone(),
+            &config.global,
+            &config.java_environments,
+        )?;
         let status = if manager.screen_session_exists()? {
             "running"
         } else {
@@ -110,8 +123,8 @@ fn list_servers(config: &Config) -> Result<()> {
         };
 
         println!(
-            "{:<24} {:<10} {}",
-            manager.config.name, manager.config.server_type, status
+            "{:<16} {:<24} {:<10} {}",
+            manager.server_id, manager.config.name, manager.config.server_type, status
         );
     }
 

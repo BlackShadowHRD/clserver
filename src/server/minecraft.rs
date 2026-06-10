@@ -18,6 +18,7 @@ pub struct MinecraftServer {
 
 impl MinecraftServer {
     pub fn new(
+        server_id: String,
         config: ServerConfig,
         global: &GlobalConfig,
         java_environments: &HashMap<String, String>,
@@ -29,7 +30,7 @@ impl MinecraftServer {
             .rcon_password
             .clone()
             .ok_or_else(|| anyhow!("Minecraft server '{}' has no rconPassword.", config.name))?;
-        let manager = ServerManager::new(config, global, java_environments)?;
+        let manager = ServerManager::new(server_id, config, global, java_environments)?;
 
         Ok(Self {
             manager,

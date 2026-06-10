@@ -235,8 +235,8 @@ default = "/usr/bin/java"
 java17 = "/usr/lib/jvm/java-17-openjdk/bin/java"
 java21 = "/usr/lib/jvm/java-21-openjdk/bin/java"
 
-[servers.survival]
-name = "survival"
+[servers.CLS4]
+name = "CatLordSurvival"
 type = "minecraft"
 javaVersion = "java21"
 javaParams = "-Xms4G -Xmx4G"
@@ -245,7 +245,7 @@ rconPort = 25575
 rconPassword = "change-me"
 backup = true
 
-[servers.velocity]
+[servers.proxy]
 name = "velocity"
 type = "velocity"
 javaVersion = "java17"
@@ -280,17 +280,26 @@ A server can reference one of these entries with `javaVersion`.
 
 If a server does not specify `javaBin` or `javaVersion`, `clServer` uses the `default` Java environment.
 
-### `[servers.<key>]`
+### `[servers.<id>]`
 
 Each server is configured under a table such as:
 
 ```toml
-[servers.survival]
+[servers.CLS4]
+name = "CatLordSurvival"
 ```
+
+The table key, `CLS4` in this example, is the server ID/shortcut used in CLI commands:
+
+```sh
+clserver status CLS4
+```
+
+The `name` field is the real server directory and `screen` session name. Server IDs must be unique; TOML enforces this because duplicate table keys are invalid. Server `name` values must also be unique because they map to directories, screen sessions, and log paths.
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `name` | Yes | Server name. This is also used as the `screen` session name. |
+| `name` | Yes | Real server directory and `screen` session name. This can differ from the server ID. |
 | `type` | Yes | Server type. Supported values: `minecraft`, `velocity`, `hytale`. |
 | `javaBin` | No | Direct path to a Java executable. Overrides `javaVersion`. |
 | `javaVersion` | No | Key from `[java_environments]`. Defaults to `default` if `javaBin` is not set. |
@@ -336,7 +345,7 @@ clserver validate-config --fix
 
 With `--fix`, `clServer` prompts before updating each mismatched `rconPassword` in `clserver.toml` from the corresponding `server.properties` value. Password values are never printed. Updated passwords are written as single-quoted TOML literal strings, which is safer for generated passwords containing characters such as backslashes.
 
-List all configured servers and whether their `screen` sessions are running:
+List all configured server IDs, real server names, types, and whether their `screen` sessions are running:
 
 ```sh
 clserver list
@@ -388,7 +397,7 @@ Show server status:
 clserver status survival
 ```
 
-Status output includes the configured server type, whether the `screen` session is running, server/log paths, latest screen log, Java executable, start mode, and whether stop/RCON/backup settings are configured.
+Status output includes the server ID, real server name, configured server type, whether the `screen` session is running, server/log paths, latest screen log, Java executable, start mode, and whether stop/RCON/backup settings are configured.
 
 Run a backup:
 

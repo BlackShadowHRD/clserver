@@ -27,10 +27,11 @@ pub struct Config {
     #[serde(default)]
     pub java_environments: HashMap<String, String>,
 
-    /// Server definitions keyed by their configured server name.
+    /// Server definitions keyed by server ID/shortcut.
     ///
-    /// The table key is expected to match `ServerConfig::name`, e.g.
-    /// `[servers.survival]` should contain `name = "survival"`.
+    /// The table key is what users pass to CLI commands, e.g. `[servers.CLS4]`
+    /// is managed with `clserver status CLS4`. The contained `name` field is
+    /// the real server directory and `screen` session name.
     #[serde(default)]
     pub servers: HashMap<String, ServerConfig>,
 }
@@ -75,17 +76,18 @@ impl fmt::Display for ServerType {
     }
 }
 
-/// Per-server configuration loaded from a `[servers.<name>]` table.
+/// Per-server configuration loaded from a `[servers.<id>]` table.
 ///
 /// A server can either provide a complete `startCommand`, or allow clServer to
 /// generate a Java command from `javaBin`/`javaVersion`, `javaParams`, and
 /// `jarFile`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
-    /// Server name and `screen` session name.
+    /// Real server directory and `screen` session name.
     ///
-    /// This should match the surrounding table key, such as
-    /// `[servers.survival]` with `name = "survival"`.
+    /// This may differ from the surrounding table key. For example,
+    /// `[servers.CLS4]` can use `name = "CatLordSurvival"`, allowing `CLS4` to
+    /// act as a shorter command-line ID.
     pub name: String,
 
     /// Server implementation type.
@@ -196,6 +198,8 @@ pub fn validate_config(config: &Config) -> Result<()> {
         }
     }
 
+    validate_unique_server_names(config, &mut errors);
+
     for (server_key, server) in &config.servers {
         validate_server_config(server_key, server, config, &mut errors);
     }
@@ -207,7 +211,25 @@ pub fn validate_config(config: &Config) -> Result<()> {
     }
 }
 
-/// Validate one `[servers.<name>]` entry and append any problems to `errors`.
+fn validate_unique_server_names(config: &Config, errors: &mut Vec<String>) {
+    let mut names: HashMap<&str, &str> = HashMap::new();
+
+    for (server_key, server) in &config.servers {
+        let name = server.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        if let Some(existing_key) = names.insert(name, server_key.as_str()) {
+            errors.push(format!(
+                "server '{}' and server '{}' both use name '{}'. Server names must be unique because they map to directories and screen sessions.",
+                existing_key, server_key, server.name
+            ));
+        }
+    }
+}
+
+/// Validate one `[servers.<id>]` entry and append any problems to `errors`.
 fn validate_server_config(
     server_key: &str,
     server: &ServerConfig,
@@ -222,11 +244,6 @@ fn validate_server_config(
 
     if server.name.trim().is_empty() {
         errors.push(format!("{label} is missing a non-empty name"));
-    } else if server.name != server_key {
-        errors.push(format!(
-            "{label} has name '{}', but the server table key is '{server_key}'. These should match.",
-            server.name
-        ));
     }
 
     validate_optional_non_empty(&label, "javaBin", server.java_bin.as_deref(), errors);
@@ -850,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_server_table_key_and_name_mismatch() {
+    fn allows_server_table_key_as_shortcut_id() {
         let config = parse_config(
             r#"
             [global]
@@ -860,8 +877,8 @@ mod tests {
             [java_environments]
             default = "/usr/bin/java"
 
-            [servers.survival]
-            name = "creative"
+            [servers.CLS4]
+            name = "CatLordSurvival"
             type = "minecraft"
             jarFile = "server.jar"
             rconPort = 25575
@@ -869,7 +886,41 @@ mod tests {
             "#,
         );
 
-        let error = validate_config(&config).expect_err("config should be invalid");
-        assert!(error.to_string().contains("These should match"));
+        validate_config(&config).expect("shortcut id should be valid");
+    }
+
+    #[test]
+    fn rejects_duplicate_server_names() {
+        let config = parse_config(
+            r#"
+            [global]
+            serverDir = "/srv/servers"
+            logDir = "/var/log/clserver"
+
+            [java_environments]
+            default = "/usr/bin/java"
+
+            [servers.CL-S]
+            name = "CatLordSurvival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25575
+            rconPassword = "secret"
+
+            [servers.survival]
+            name = "CatLordSurvival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25576
+            rconPassword = "secret"
+            "#,
+        );
+
+        let error = validate_config(&config).expect_err("duplicate server names should be invalid");
+        assert!(
+            error
+                .to_string()
+                .contains("both use name 'CatLordSurvival'")
+        );
     }
 }

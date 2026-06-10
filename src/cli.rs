@@ -83,10 +83,13 @@ pub struct Request {
 }
 
 pub fn parse_request() -> Result<Request> {
-    parse_request_from(std::env::args_os())
+    match parse_request_from(std::env::args_os()) {
+        Ok(request) => Ok(request),
+        Err(error) => error.exit(),
+    }
 }
 
-fn parse_request_from<I, T>(args: I) -> Result<Request>
+fn parse_request_from<I, T>(args: I) -> std::result::Result<Request, clap::Error>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,

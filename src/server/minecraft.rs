@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::Duration;
@@ -51,12 +51,17 @@ impl MinecraftServer {
     }
 
     fn friendly_stop(&self) -> Result<()> {
-        if !self.is_up_server() {
-            warn!(server = %self.manager.config.name, "server appears not to be running");
+        if !self.manager.screen_session_exists()? {
+            warn!(server = %self.manager.config.name, "screen session is not running; skipping minecraft stop");
             return Ok(());
         }
 
-        let response = self.rcon_command("list")?;
+        let response = self.rcon_command("list").with_context(|| {
+            format!(
+                "Minecraft server '{}' has a running screen session, but RCON is not reachable for friendly stop",
+                self.manager.config.name
+            )
+        })?;
         let player_count = parse_player_count(&response).unwrap_or(0);
 
         info!(
@@ -84,13 +89,18 @@ impl MinecraftServer {
     }
 
     fn immediate_stop(&self) -> Result<()> {
-        if self.is_up_server() {
-            self.rcon_command("stop")?;
-            info!(server = %self.manager.config.name, "minecraft server stopping immediately");
-        } else {
-            warn!(server = %self.manager.config.name, "server appears not to be running");
+        if !self.manager.screen_session_exists()? {
+            warn!(server = %self.manager.config.name, "screen session is not running; skipping minecraft stop");
+            return Ok(());
         }
 
+        self.rcon_command("stop").with_context(|| {
+            format!(
+                "Minecraft server '{}' has a running screen session, but RCON stop failed",
+                self.manager.config.name
+            )
+        })?;
+        info!(server = %self.manager.config.name, "minecraft server stopping immediately");
         Ok(())
     }
 
@@ -98,10 +108,6 @@ impl MinecraftServer {
         self.stop_server(StopType::Immediate)?;
         sleep(Duration::from_secs(10));
         self.start_server()
-    }
-
-    fn is_up_server(&self) -> bool {
-        self.rcon_command("list").is_ok()
     }
 
     fn rcon_command(&self, command: &str) -> Result<String> {

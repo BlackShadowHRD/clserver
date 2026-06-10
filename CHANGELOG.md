@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- Project documentation in `README.md`.
+- Project documentation in `README.md`, including installation and deployment guidance.
 - Configuration validation with aggregated error messages for missing or invalid settings.
 - Minecraft RCON password consistency check against `server.properties`.
 - Global `--verbose` / `-v` CLI option for debugging logs.

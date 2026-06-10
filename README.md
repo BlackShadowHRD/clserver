@@ -12,7 +12,7 @@
 - Global command log file
 - Configurable Java installations per server
 
-> **Note:** `status` and `backup` are currently placeholders and are not implemented yet.
+> **Note:** `backup` is currently a placeholder and is not implemented yet.
 
 ## Requirements
 
@@ -40,6 +40,152 @@ For local development, you can run commands directly with Cargo:
 
 ```sh
 cargo run -- --help
+```
+
+## Installation and deployment
+
+### Install server dependencies
+
+On the server that will run `clServer`, install the required runtime tools:
+
+```sh
+sudo apt update
+sudo apt install screen bash
+```
+
+Install the Java runtime versions required by your configured servers. For example:
+
+```sh
+sudo apt install openjdk-21-jre-headless
+```
+
+If you want to build from source on the server, install Rust with `rustup` and make sure build tools are available:
+
+```sh
+sudo apt install build-essential pkg-config
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
+```
+
+### Build the release binary
+
+Build on the server or on another compatible Ubuntu machine:
+
+```sh
+cargo build --release
+```
+
+The release binary is created at:
+
+```text
+target/release/clserver
+```
+
+### Install the binary
+
+A common install location for locally managed CLI tools is:
+
+```text
+/usr/local/bin/clserver
+```
+
+Install it with:
+
+```sh
+sudo install -m 755 target/release/clserver /usr/local/bin/clserver
+```
+
+Confirm it is available:
+
+```sh
+clserver --help
+```
+
+### Deploy configuration
+
+Create the config directory for the user that will run `clServer`:
+
+```sh
+mkdir -p ~/.config/cls
+```
+
+Create or copy the config file to:
+
+```text
+~/.config/cls/cls.toml
+```
+
+If `XDG_CONFIG_HOME` is set, the config path is instead:
+
+```text
+$XDG_CONFIG_HOME/cls/cls.toml
+```
+
+Make sure the paths in `cls.toml` match the server filesystem, especially:
+
+- `global.serverDir`
+- `global.logDir`
+- Java executable paths in `[java_environments]`
+- each server's `jarFile`, `startCommand`, `stopCommand`, and RCON settings
+
+### Runtime log locations
+
+Application logs are written to:
+
+```text
+$XDG_STATE_HOME/cls/clserver.log
+```
+
+If `XDG_STATE_HOME` is not set, this is usually:
+
+```text
+~/.local/state/cls/clserver.log
+```
+
+Per-server `screen` logs are written under:
+
+```text
+<global.logDir>/servers/<server name>/<timestamp>.log
+```
+
+### Smoke test a deployment
+
+After installing the binary and config, run:
+
+```sh
+clserver status <server-name>
+```
+
+Then check the application log:
+
+```sh
+tail -n 50 ~/.local/state/cls/clserver.log
+```
+
+If the server should be running, check that `screen` can see the session:
+
+```sh
+screen -ls
+```
+
+### Updating an existing install
+
+Build the new release binary:
+
+```sh
+cargo build --release
+```
+
+Replace the installed binary:
+
+```sh
+sudo install -m 755 target/release/clserver /usr/local/bin/clserver
+```
+
+Confirm the installed version still starts:
+
+```sh
+clserver --help
 ```
 
 ## Configuration

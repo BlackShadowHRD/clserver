@@ -18,6 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `validate-config --fix` option to prompt before updating mismatched `rconPassword` values in `clserver.toml` from `server.properties`, writing passwords as single-quoted TOML literal strings.
 - `tracing`-based application logging with stderr output and persistent file logging under `$XDG_STATE_HOME/clserver/clserver.log`.
 - Unit tests for configuration validation, `server.properties` RCON password parsing, and CLI subcommand parsing.
+- `maintenance` command for daily fleet maintenance with Velocity-first handling and parallel backend stop/backup/start processing.
+- `enabled` server setting for maintenance restart decisions.
+- `global.backupDir` setting and `rsync`-based server backups.
 
 ### Changed
 
@@ -39,6 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `$XDG_STATE_HOME/clserver/clserver.log`
 - Server table keys now act as command IDs/shortcuts, while `name` is the real server directory and `screen` session name.
 - Server `name` values are now validated as unique; duplicate TOML table IDs are rejected by TOML parsing.
+- `backup` now runs `rsync -av --delete` instead of being a placeholder.
 
 ### Fixed
 
@@ -67,7 +71,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Known limitations
 
 - `status` command is exposed but not implemented yet.
-- `backup` command is exposed but not implemented yet.
 - `screen` session detection uses substring matching against `screen -ls` output.
 - Minecraft RCON responses are currently read as a single packet.
 - There are currently no automated tests.

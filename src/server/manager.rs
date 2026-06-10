@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
@@ -16,6 +16,7 @@ pub struct ServerManager {
     java_bin: String,
     server_dir: PathBuf,
     log_dir: PathBuf,
+    backup_dir: Option<PathBuf>,
 }
 
 impl ServerManager {
@@ -28,6 +29,7 @@ impl ServerManager {
         let java_bin = resolve_java_bin(&config, java_environments)?;
         let server_dir = global.server_dir.join(&config.name);
         let log_dir = global.log_dir.clone();
+        let backup_dir = global.backup_dir.clone();
 
         Ok(Self {
             server_id,
@@ -35,6 +37,7 @@ impl ServerManager {
             java_bin,
             server_dir,
             log_dir,
+            backup_dir,
         })
     }
 
@@ -162,6 +165,22 @@ impl ServerManager {
         self.start_server()
     }
 
+    pub fn wait_until_stopped(&self, timeout: Duration, poll_interval: Duration) -> Result<bool> {
+        let deadline = std::time::Instant::now() + timeout;
+
+        while std::time::Instant::now() < deadline {
+            if !self.screen_session_exists()? {
+                info!(server = %self.config.name, "server is fully stopped");
+                return Ok(true);
+            }
+
+            sleep(poll_interval);
+        }
+
+        warn!(server = %self.config.name, timeout_seconds = timeout.as_secs(), "timed out waiting for server to stop");
+        Ok(false)
+    }
+
     pub fn attach_server(&self) -> Result<()> {
         let status = Command::new("screen")
             .args(["-r", &self.config.name])
@@ -251,9 +270,52 @@ impl ServerManager {
     }
 
     pub fn backup_server(&self) -> Result<()> {
-        println!("not yet implemented");
+        let backup_root = self.backup_dir.as_ref().ok_or_else(|| {
+            anyhow!(
+                "Server '{}' has backup enabled, but global.backupDir is not configured.",
+                self.config.name
+            )
+        })?;
+        let destination = backup_root.join(&self.config.name);
+
+        fs::create_dir_all(backup_root).with_context(|| {
+            format!(
+                "Failed to create backup directory '{}'",
+                backup_root.display()
+            )
+        })?;
+
+        let source = format_path_with_trailing_slash(&self.server_dir);
+        info!(server = %self.config.name, source = %source, destination = %destination.display(), "starting server backup");
+
+        let status = Command::new("rsync")
+            .arg("-av")
+            .arg("--delete")
+            .arg(&source)
+            .arg(&destination)
+            .status()
+            .context("Failed to run 'rsync' for server backup")?;
+
+        if !status.success() {
+            error!(server = %self.config.name, exit_code = ?status.code(), "server backup failed");
+            bail!(
+                "Backup failed for server '{}'. Return code: {:?}",
+                self.config.name,
+                status.code()
+            );
+        }
+
+        info!(server = %self.config.name, destination = %destination.display(), "server backup completed");
         Ok(())
     }
+}
+
+fn format_path_with_trailing_slash(path: &Path) -> String {
+    let mut text = path.display().to_string();
+    if !text.ends_with(std::path::MAIN_SEPARATOR) {
+        text.push(std::path::MAIN_SEPARATOR);
+    }
+    text
 }
 
 fn path_status(path: &PathBuf) -> Result<&'static str> {
@@ -364,5 +426,15 @@ mod tests {
         "#;
 
         assert!(!screen_session_exists_in_output(output, "survival"));
+    }
+
+    #[test]
+    fn formats_backup_source_with_trailing_slash() {
+        let path = PathBuf::from("/srv/servers/survival");
+
+        assert_eq!(
+            format_path_with_trailing_slash(&path),
+            "/srv/servers/survival/"
+        );
     }
 }

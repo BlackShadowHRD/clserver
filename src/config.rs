@@ -13,7 +13,7 @@ use toml_edit::{DocumentMut, Item, Value};
 /// and one or more configured servers under `[servers.<name>]` tables. Serde
 /// defaults are used here so that validation can report friendly, aggregated
 /// errors instead of failing immediately on missing sections.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     /// Global filesystem locations shared by all configured servers.
     #[serde(default)]
@@ -37,7 +37,7 @@ pub struct Config {
 }
 
 /// Global filesystem settings shared by every server.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct GlobalConfig {
     /// Base directory containing server directories.
     ///
@@ -49,6 +49,10 @@ pub struct GlobalConfig {
     /// Base directory for per-server `screen` logs.
     #[serde(rename = "logDir")]
     pub log_dir: PathBuf,
+
+    /// Base directory where server backups are written.
+    #[serde(rename = "backupDir")]
+    pub backup_dir: Option<PathBuf>,
 }
 
 /// Supported server runtime categories.
@@ -138,11 +142,12 @@ pub struct ServerConfig {
     #[serde(rename = "rconPassword")]
     pub rcon_password: Option<String>,
 
-    /// Whether this server should participate in backup workflows.
+    /// Whether this server should be started by whole-fleet maintenance.
     ///
-    /// Backup behavior is currently not implemented, but the field is retained
-    /// for forward-compatible config files.
-    #[allow(dead_code)]
+    /// Missing values default to false for maintenance restart decisions.
+    pub enabled: Option<bool>,
+
+    /// Whether this server should participate in backup workflows.
     pub backup: Option<bool>,
 }
 
@@ -182,6 +187,15 @@ pub fn validate_config(config: &Config) -> Result<()> {
         errors.push("global.logDir is required and cannot be empty".to_string());
     }
 
+    if config
+        .global
+        .backup_dir
+        .as_ref()
+        .is_some_and(|path| is_blank_path(path))
+    {
+        errors.push("global.backupDir cannot be empty when configured".to_string());
+    }
+
     if config.servers.is_empty() {
         errors.push("at least one server must be configured under [servers]".to_string());
     }
@@ -202,6 +216,19 @@ pub fn validate_config(config: &Config) -> Result<()> {
 
     for (server_key, server) in &config.servers {
         validate_server_config(server_key, server, config, &mut errors);
+    }
+
+    if config
+        .servers
+        .values()
+        .any(|server| server.backup.unwrap_or(false))
+        && config
+            .global
+            .backup_dir
+            .as_ref()
+            .is_none_or(|path| is_blank_path(path))
+    {
+        errors.push("global.backupDir is required when any server has backup = true".to_string());
     }
 
     if errors.is_empty() {
@@ -726,6 +753,62 @@ mod tests {
         );
 
         validate_config(&config).expect("config should be valid");
+    }
+
+    #[test]
+    fn validates_backup_dir_when_backup_is_enabled() {
+        let config = parse_config(
+            r#"
+        [global]
+        serverDir = "/srv/servers"
+        logDir = "/var/log/clserver"
+        backupDir = "/srv/backups"
+
+        [java_environments]
+        default = "/usr/bin/java"
+
+        [servers.survival]
+        name = "survival"
+        type = "minecraft"
+        jarFile = "server.jar"
+        rconPort = 25575
+        rconPassword = "secret"
+        backup = true
+        enabled = true
+        "#,
+        );
+
+        validate_config(&config).expect("backup config should be valid");
+        assert_eq!(
+            config.global.backup_dir.as_deref(),
+            Some(Path::new("/srv/backups"))
+        );
+        assert_eq!(config.servers["survival"].enabled, Some(true));
+    }
+
+    #[test]
+    fn rejects_missing_backup_dir_when_backup_is_enabled() {
+        let config = parse_config(
+            r#"
+        [global]
+        serverDir = "/srv/servers"
+        logDir = "/var/log/clserver"
+
+        [java_environments]
+        default = "/usr/bin/java"
+
+        [servers.survival]
+        name = "survival"
+        type = "minecraft"
+        jarFile = "server.jar"
+        rconPort = 25575
+        rconPassword = "secret"
+        backup = true
+        "#,
+        );
+
+        let error = validate_config(&config).expect_err("missing backupDir should be invalid");
+        assert!(error.to_string().contains("global.backupDir is required"));
     }
 
     #[test]

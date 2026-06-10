@@ -35,6 +35,9 @@ enum Commands {
     /// Restart the named server
     Restart { server: String },
 
+    /// Run daily maintenance across configured servers
+    Maintenance,
+
     /// Attach to the named server's screen session
     Attach { server: String },
 
@@ -58,6 +61,7 @@ pub enum Action {
     Stop { stop_type: StopType },
     Backup,
     Restart,
+    Maintenance,
     Attach,
     Status,
     List,
@@ -93,6 +97,7 @@ where
         Commands::Stop { server, stop_type } => (Action::Stop { stop_type }, Some(server)),
         Commands::Backup { server } => (Action::Backup, Some(server)),
         Commands::Restart { server } => (Action::Restart, Some(server)),
+        Commands::Maintenance => (Action::Maintenance, None),
         Commands::Attach { server } => (Action::Attach, Some(server)),
         Commands::Status { server } => (Action::Status, Some(server)),
         Commands::List => (Action::List, None),
@@ -197,6 +202,15 @@ mod tests {
         let request = parse_request_from(["clserver", "list"])?;
 
         assert!(matches!(request.action, Action::List));
+        assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_maintenance_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "maintenance"])?;
+
+        assert!(matches!(request.action, Action::Maintenance));
         assert_eq!(request.server, None);
         Ok(())
     }

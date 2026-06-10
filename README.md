@@ -7,12 +7,10 @@
 - Start configured servers in detached `screen` sessions
 - Stop Minecraft servers through RCON
 - Stop Velocity/Hytale-style servers by sending a configured stop command to `screen`
-- Restart, attach, status, and backup commands exposed through the CLI
+- Restart, attach, status, backup, and daily maintenance commands exposed through the CLI
 - Per-server screen log files
 - Global command log file
 - Configurable Java installations per server
-
-> **Note:** `backup` is currently a placeholder and is not implemented yet.
 
 ## Requirements
 
@@ -21,6 +19,7 @@
 - `bash`, used when launching generated start commands
 - Java runtime(s) for the servers you want to run
 - Minecraft RCON enabled for Minecraft stop/restart support
+- `rsync`, for backup and maintenance workflows that copy server files
 
 ## Building
 
@@ -50,7 +49,7 @@ On the server that will run `clServer`, install the required runtime tools:
 
 ```sh
 sudo apt update
-sudo apt install screen bash
+sudo apt install screen bash rsync
 ```
 
 Install the Java runtime versions required by your configured servers. For example:
@@ -229,6 +228,7 @@ Then create:
 [global]
 serverDir = "/srv/servers"
 logDir = "/var/log/clserver"
+backupDir = "/srv/backups/clserver"
 
 [java_environments]
 default = "/usr/bin/java"
@@ -243,6 +243,7 @@ javaParams = "-Xms4G -Xmx4G"
 jarFile = "server.jar"
 rconPort = 25575
 rconPassword = "change-me"
+enabled = true
 backup = true
 
 [servers.proxy]
@@ -252,6 +253,7 @@ javaVersion = "java17"
 javaParams = "-Xms1G -Xmx1G"
 jarFile = "velocity.jar"
 stopCommand = "end"
+enabled = true
 backup = false
 ```
 
@@ -263,6 +265,7 @@ backup = false
 | --- | --- | --- |
 | `serverDir` | Yes | Base directory containing all server directories. Each server is expected at `<serverDir>/<server name>`. |
 | `logDir` | Yes | Base directory for per-server screen logs. |
+| `backupDir` | Required when any server has `backup = true` | Base directory for `rsync` backups. Each server is backed up to `<backupDir>/<server name>`. |
 
 ### `[java_environments]`
 
@@ -309,7 +312,8 @@ The `name` field is the real server directory and `screen` session name. Server 
 | `stopCommand` | Required for Velocity/Hytale stop/restart | Command sent to the server's `screen` session when stopping. |
 | `rconPort` | Required for Minecraft | RCON port for Minecraft servers. |
 | `rconPassword` | Required for Minecraft | RCON password for Minecraft servers. |
-| `backup` | No | Whether this server should be considered for backup behavior. Backup is not implemented yet. |
+| `enabled` | No | Whether whole-fleet maintenance should start this server. Missing values are treated as `false` for maintenance. |
+| `backup` | No | Whether `backup` and `maintenance` should copy this server with `rsync`. Requires `global.backupDir` when true. |
 
 ## CLI usage
 
@@ -405,7 +409,39 @@ Run a backup:
 clserver backup survival
 ```
 
-> `backup` is currently not implemented.
+Run daily maintenance across the configured fleet:
+
+```sh
+clserver maintenance
+```
+
+Maintenance performs this workflow:
+
+1. If any Velocity server is running, stop it, wait for its `screen` session to exit, then start it again before touching other servers. If a Velocity server is not running but has `enabled = true`, start it in this pre-backend phase.
+2. For all non-Velocity servers, determine which servers are currently running.
+3. Process non-Velocity servers in parallel:
+   - stop only servers that were running
+   - use `friendly` shutdown for Minecraft; if no players are online, this becomes immediate
+   - use the configured `stopCommand` immediately for other server types
+   - wait for the `screen` session to exit
+   - run `rsync -av --delete` for servers with `backup = true`
+   - start servers with `enabled = true`
+
+## How backups work
+
+Backups use `rsync` and copy:
+
+```text
+<global.serverDir>/<server name>/
+```
+
+to:
+
+```text
+<global.backupDir>/<server name>
+```
+
+The trailing slash on the source is intentional: it backs up the contents of the server directory into the per-server backup directory. `--delete` removes files from the backup that no longer exist in the source.
 
 ## How servers are started
 

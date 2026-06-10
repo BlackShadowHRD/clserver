@@ -2,15 +2,20 @@ pub mod generic;
 pub mod manager;
 pub mod minecraft;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::{Action, Request, StopType};
 use crate::config::{self, Config, ServerType};
-use tracing::warn;
+use std::thread;
+use std::time::Duration;
+use tracing::{info, warn};
 
 use generic::GenericServer;
 use manager::ServerManager;
 use minecraft::MinecraftServer;
+
+const MAINTENANCE_STOP_TIMEOUT: Duration = Duration::from_secs(900);
+const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
     if let Action::ValidateConfig { fix } = request.action {
@@ -19,6 +24,10 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
 
     if matches!(request.action, Action::List) {
         return list_servers(&config);
+    }
+
+    if matches!(request.action, Action::Maintenance) {
+        return run_maintenance(&mut config);
     }
 
     let server_name = request
@@ -75,7 +84,9 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
         Action::Restart => server.restart_server(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
-        Action::List | Action::ValidateConfig { .. } => no_server_action_unreachable(),
+        Action::Maintenance | Action::List | Action::ValidateConfig { .. } => {
+            no_server_action_unreachable()
+        }
     }
 }
 
@@ -100,8 +111,309 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
         Action::Restart => server.manager.restart_with_stop_command(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
-        Action::List | Action::ValidateConfig { .. } => no_server_action_unreachable(),
+        Action::Maintenance | Action::List | Action::ValidateConfig { .. } => {
+            no_server_action_unreachable()
+        }
     }
+}
+
+fn run_maintenance(config: &mut Config) -> Result<()> {
+    info!("daily maintenance started");
+    println!("Daily maintenance started");
+
+    reconcile_running_minecraft_servers(config)?;
+    handle_velocity_servers(config)?;
+
+    let tasks = build_maintenance_tasks(config)?;
+    let task_count = tasks.len();
+    info!(task_count, "starting parallel server maintenance tasks");
+
+    let handles: Vec<_> = tasks
+        .into_iter()
+        .map(|task| {
+            thread::spawn(move || {
+                let server_id = task.server.server_id().to_string();
+                let result = process_maintenance_task(task);
+                (server_id, result)
+            })
+        })
+        .collect();
+
+    let mut failures = Vec::new();
+    for handle in handles {
+        let (server_id, result) = handle
+            .join()
+            .map_err(|_| anyhow!("maintenance worker thread panicked"))?;
+
+        if let Err(err) = result {
+            failures.push(format!("{server_id}: {err:#}"));
+        }
+    }
+
+    if failures.is_empty() {
+        info!(task_count, "daily maintenance finished successfully");
+        println!("Daily maintenance finished");
+        Ok(())
+    } else {
+        for failure in &failures {
+            tracing::error!(%failure, "maintenance task failed");
+        }
+        bail!("Daily maintenance failed:\n- {}", failures.join("\n- "));
+    }
+}
+
+fn reconcile_running_minecraft_servers(config: &mut Config) -> Result<()> {
+    let running_minecraft_ids =
+        running_server_ids(config, |server_type| server_type == ServerType::Minecraft)?;
+
+    for server_id in running_minecraft_ids {
+        config::reconcile_minecraft_rcon_password(config, &server_id)?;
+    }
+
+    Ok(())
+}
+
+fn handle_velocity_servers(config: &Config) -> Result<()> {
+    let mut velocity_ids: Vec<_> = config
+        .servers
+        .iter()
+        .filter(|(_, server)| server.server_type == ServerType::Velocity)
+        .map(|(server_id, _)| server_id.clone())
+        .collect();
+    velocity_ids.sort();
+
+    for server_id in velocity_ids {
+        let server_config = config
+            .servers
+            .get(&server_id)
+            .ok_or_else(|| anyhow!("Server '{}' not found in configuration file.", server_id))?;
+        let manager = manager_for_server(config, &server_id)?;
+        let was_running = manager.screen_session_exists()?;
+        let should_start = server_config.enabled.unwrap_or(false);
+
+        if was_running {
+            info!(server = %manager.config.name, id = %manager.server_id, "stopping velocity server before backend maintenance");
+            println!("Stopping Velocity server {}", manager.server_id);
+            manager.stop_with_stop_command()?;
+            ensure_manager_stopped(&manager)?;
+
+            info!(server = %manager.config.name, id = %manager.server_id, "restarting velocity server before backend maintenance");
+            println!("Starting Velocity server {}", manager.server_id);
+            manager.start_server()?;
+        } else if should_start {
+            info!(server = %manager.config.name, id = %manager.server_id, "starting enabled velocity server before backend maintenance");
+            println!("Starting Velocity server {}", manager.server_id);
+            manager.start_server()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn build_maintenance_tasks(config: &Config) -> Result<Vec<MaintenanceTask>> {
+    let mut server_ids: Vec<_> = config.servers.keys().cloned().collect();
+    server_ids.sort();
+
+    let mut tasks = Vec::new();
+    for server_id in server_ids {
+        let server_config = config
+            .servers
+            .get(&server_id)
+            .ok_or_else(|| anyhow!("Server '{}' not found in configuration file.", server_id))?;
+
+        if server_config.server_type == ServerType::Velocity {
+            continue;
+        }
+
+        let server = maintenance_server_for_config(config, &server_id)?;
+        let was_running = server.screen_session_exists()?;
+        let should_start = server_config.enabled.unwrap_or(false);
+        let should_backup = server_config.backup.unwrap_or(false);
+
+        if was_running || should_start || should_backup {
+            tasks.push(MaintenanceTask {
+                server,
+                was_running,
+                should_start,
+                should_backup,
+            });
+        }
+    }
+
+    Ok(tasks)
+}
+
+fn running_server_ids(
+    config: &Config,
+    server_type_matches: impl Fn(ServerType) -> bool,
+) -> Result<Vec<String>> {
+    let mut ids = Vec::new();
+
+    for (server_id, server_config) in &config.servers {
+        if !server_type_matches(server_config.server_type) {
+            continue;
+        }
+
+        let manager = manager_for_server(config, server_id)?;
+        if manager.screen_session_exists()? {
+            ids.push(server_id.clone());
+        }
+    }
+
+    Ok(ids)
+}
+
+struct MaintenanceTask {
+    server: MaintenanceServer,
+    was_running: bool,
+    should_start: bool,
+    should_backup: bool,
+}
+
+enum MaintenanceServer {
+    Minecraft(MinecraftServer),
+    Generic(ServerManager),
+}
+
+impl MaintenanceServer {
+    fn server_id(&self) -> &str {
+        match self {
+            Self::Minecraft(server) => &server.manager.server_id,
+            Self::Generic(manager) => &manager.server_id,
+        }
+    }
+
+    fn server_name(&self) -> &str {
+        match self {
+            Self::Minecraft(server) => &server.manager.config.name,
+            Self::Generic(manager) => &manager.config.name,
+        }
+    }
+
+    fn screen_session_exists(&self) -> Result<bool> {
+        match self {
+            Self::Minecraft(server) => server.manager.screen_session_exists(),
+            Self::Generic(manager) => manager.screen_session_exists(),
+        }
+    }
+
+    fn stop_for_maintenance(&self) -> Result<()> {
+        match self {
+            Self::Minecraft(server) => server.stop_server(StopType::Friendly),
+            Self::Generic(manager) => manager.stop_with_stop_command(),
+        }
+    }
+
+    fn wait_until_stopped(&self) -> Result<bool> {
+        match self {
+            Self::Minecraft(server) => server
+                .manager
+                .wait_until_stopped(MAINTENANCE_STOP_TIMEOUT, MAINTENANCE_POLL_INTERVAL),
+            Self::Generic(manager) => {
+                manager.wait_until_stopped(MAINTENANCE_STOP_TIMEOUT, MAINTENANCE_POLL_INTERVAL)
+            }
+        }
+    }
+
+    fn backup_server(&self) -> Result<()> {
+        match self {
+            Self::Minecraft(server) => server.manager.backup_server(),
+            Self::Generic(manager) => manager.backup_server(),
+        }
+    }
+
+    fn start_server(&self) -> Result<()> {
+        match self {
+            Self::Minecraft(server) => server.start_server(),
+            Self::Generic(manager) => manager.start_server(),
+        }
+    }
+}
+
+fn maintenance_server_for_config(config: &Config, server_id: &str) -> Result<MaintenanceServer> {
+    let server_config = config
+        .servers
+        .get(server_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("Server '{}' not found in configuration file.", server_id))?;
+
+    match server_config.server_type {
+        ServerType::Minecraft => Ok(MaintenanceServer::Minecraft(MinecraftServer::new(
+            server_id.to_string(),
+            server_config,
+            &config.global,
+            &config.java_environments,
+        )?)),
+        ServerType::Velocity | ServerType::Hytale => {
+            Ok(MaintenanceServer::Generic(ServerManager::new(
+                server_id.to_string(),
+                server_config,
+                &config.global,
+                &config.java_environments,
+            )?))
+        }
+    }
+}
+
+fn process_maintenance_task(task: MaintenanceTask) -> Result<()> {
+    let server_id = task.server.server_id().to_string();
+    let server_name = task.server.server_name().to_string();
+    info!(server = %server_name, id = %server_id, "maintenance task started");
+    println!("Maintaining {server_id}");
+
+    if task.was_running {
+        task.server.stop_for_maintenance()?;
+        ensure_stopped(&task.server)?;
+    }
+
+    if task.should_backup {
+        task.server.backup_server()?;
+    }
+
+    if task.should_start {
+        task.server.start_server()?;
+    }
+
+    info!(server = %server_name, id = %server_id, "maintenance task finished");
+    Ok(())
+}
+
+fn ensure_stopped(server: &MaintenanceServer) -> Result<()> {
+    if server.wait_until_stopped()? {
+        Ok(())
+    } else {
+        bail!(
+            "Timed out waiting for server '{}' to stop",
+            server.server_name()
+        );
+    }
+}
+
+fn ensure_manager_stopped(manager: &ServerManager) -> Result<()> {
+    if manager.wait_until_stopped(MAINTENANCE_STOP_TIMEOUT, MAINTENANCE_POLL_INTERVAL)? {
+        Ok(())
+    } else {
+        bail!(
+            "Timed out waiting for server '{}' to stop",
+            manager.config.name
+        );
+    }
+}
+
+fn manager_for_server(config: &Config, server_id: &str) -> Result<ServerManager> {
+    let server_config = config
+        .servers
+        .get(server_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("Server '{}' not found in configuration file.", server_id))?;
+
+    ServerManager::new(
+        server_id.to_string(),
+        server_config,
+        &config.global,
+        &config.java_environments,
+    )
+    .with_context(|| format!("Failed to initialize server manager for '{server_id}'"))
 }
 
 fn list_servers(config: &Config) -> Result<()> {

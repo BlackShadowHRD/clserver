@@ -80,6 +80,26 @@ impl fmt::Display for ServerType {
     }
 }
 
+/// Scope to restore from a server backup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RestoreMode {
+    /// Restore only the `world` directory.
+    #[default]
+    World,
+    /// Restore every backed-up file for the server.
+    All,
+}
+
+impl fmt::Display for RestoreMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RestoreMode::World => write!(f, "world"),
+            RestoreMode::All => write!(f, "all"),
+        }
+    }
+}
+
 /// Per-server configuration loaded from a `[servers.<id>]` table.
 ///
 /// A server can either provide a complete `startCommand`, or allow clServer to
@@ -149,6 +169,11 @@ pub struct ServerConfig {
 
     /// Whether this server should participate in backup workflows.
     pub backup: Option<bool>,
+
+    /// Restore scope used by `clserver restore <server>`.
+    ///
+    /// Missing values default to `world`.
+    pub restore: Option<RestoreMode>,
 }
 
 /// Load, parse, and validate the user's `clserver.toml` configuration file.
@@ -784,6 +809,42 @@ mod tests {
             Some(Path::new("/srv/backups"))
         );
         assert_eq!(config.servers["survival"].enabled, Some(true));
+    }
+
+    #[test]
+    fn parses_restore_mode_and_defaults_missing_restore_to_world() {
+        let config = parse_config(
+            r#"
+        [global]
+        serverDir = "/srv/servers"
+        logDir = "/var/log/clserver"
+
+        [java_environments]
+        default = "/usr/bin/java"
+
+        [servers.survival]
+        name = "survival"
+        type = "minecraft"
+        jarFile = "server.jar"
+        rconPort = 25575
+        rconPassword = "secret"
+
+        [servers.creative]
+        name = "creative"
+        type = "minecraft"
+        jarFile = "server.jar"
+        rconPort = 25576
+        rconPassword = "secret"
+        restore = "all"
+        "#,
+        );
+
+        validate_config(&config).expect("restore config should be valid");
+        assert_eq!(
+            config.servers["survival"].restore.unwrap_or_default(),
+            RestoreMode::World
+        );
+        assert_eq!(config.servers["creative"].restore, Some(RestoreMode::All));
     }
 
     #[test]

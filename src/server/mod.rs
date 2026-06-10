@@ -73,7 +73,10 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
 }
 
 fn action_needs_minecraft_rcon(action: &Action) -> bool {
-    matches!(action, Action::Stop { .. } | Action::Restart)
+    matches!(
+        action,
+        Action::Stop { .. } | Action::Restart | Action::Backup | Action::Restore
+    )
 }
 
 fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
@@ -81,6 +84,7 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
         Action::Start => server.start_server(),
         Action::Stop { stop_type } => server.stop_server(stop_type),
         Action::Backup => backup_minecraft_server(server),
+        Action::Restore => restore_minecraft_server(server),
         Action::Restart => server.restart_server(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
@@ -108,6 +112,7 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
             }
         }
         Action::Backup => backup_generic_server(&server.manager),
+        Action::Restore => restore_generic_server(&server.manager),
         Action::Restart => server.manager.restart_with_stop_command(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
@@ -159,6 +164,50 @@ fn backup_generic_server(manager: &ServerManager) -> Result<()> {
     }
 
     backup_result
+}
+
+fn restore_minecraft_server(server: &MinecraftServer) -> Result<()> {
+    let was_running = server.manager.screen_session_exists()?;
+
+    if was_running {
+        server.stop_server(StopType::Friendly)?;
+        ensure_manager_stopped(&server.manager)?;
+    }
+
+    let restore_result = server.manager.restore_server();
+
+    if was_running && let Err(start_err) = server.start_server() {
+        return match restore_result {
+            Ok(()) => Err(start_err).context("Restore completed, but failed to restart server"),
+            Err(restore_err) => Err(restore_err).context(format!(
+                "Restore failed, and server restart also failed: {start_err:#}"
+            )),
+        };
+    }
+
+    restore_result
+}
+
+fn restore_generic_server(manager: &ServerManager) -> Result<()> {
+    let was_running = manager.screen_session_exists()?;
+
+    if was_running {
+        manager.stop_with_stop_command()?;
+        ensure_manager_stopped(manager)?;
+    }
+
+    let restore_result = manager.restore_server();
+
+    if was_running && let Err(start_err) = manager.start_server() {
+        return match restore_result {
+            Ok(()) => Err(start_err).context("Restore completed, but failed to restart server"),
+            Err(restore_err) => Err(restore_err).context(format!(
+                "Restore failed, and server restart also failed: {start_err:#}"
+            )),
+        };
+    }
+
+    restore_result
 }
 
 fn run_maintenance(config: &mut Config) -> Result<()> {

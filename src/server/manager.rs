@@ -2,12 +2,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Local;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
-use crate::config::{GlobalConfig, ServerConfig, resolve_java_bin};
+use crate::config::{GlobalConfig, RestoreMode, ServerConfig, resolve_java_bin};
 use tracing::{debug, error, info, warn};
 
 pub struct ServerManager {
@@ -265,17 +266,13 @@ impl ServerManager {
             "Backup enabled: {}",
             yes_no(self.config.backup.unwrap_or(false))
         );
+        println!("Restore mode: {}", self.config.restore.unwrap_or_default());
 
         Ok(())
     }
 
     pub fn backup_server(&self) -> Result<()> {
-        let backup_root = self.backup_dir.as_ref().ok_or_else(|| {
-            anyhow!(
-                "Server '{}' has backup enabled, but global.backupDir is not configured.",
-                self.config.name
-            )
-        })?;
+        let backup_root = self.backup_root()?;
         let destination = backup_root.join(&self.config.name);
 
         fs::create_dir_all(backup_root).with_context(|| {
@@ -288,25 +285,146 @@ impl ServerManager {
         let source = format_path_with_trailing_slash(&self.server_dir);
         info!(server = %self.config.name, source = %source, destination = %destination.display(), "starting server backup");
 
-        let status = Command::new("rsync")
-            .arg("-av")
-            .arg("--delete")
-            .arg(&source)
-            .arg(&destination)
-            .status()
-            .context("Failed to run 'rsync' for server backup")?;
-
-        if !status.success() {
-            error!(server = %self.config.name, exit_code = ?status.code(), "server backup failed");
-            bail!(
-                "Backup failed for server '{}'. Return code: {:?}",
-                self.config.name,
-                status.code()
-            );
-        }
+        run_rsync(&source, &destination, "backup", &self.config.name)?;
 
         info!(server = %self.config.name, destination = %destination.display(), "server backup completed");
         Ok(())
+    }
+
+    pub fn restore_server(&self) -> Result<()> {
+        let mode = self.config.restore.unwrap_or_default();
+        let (source, destination) = self.restore_paths(mode)?;
+
+        ensure_path_exists(&source, "restore source")?;
+        confirm_restore(
+            &self.server_id,
+            &self.config.name,
+            mode,
+            &source,
+            &destination,
+        )?;
+
+        if matches!(mode, RestoreMode::World) {
+            fs::create_dir_all(&destination).with_context(|| {
+                format!(
+                    "Failed to create restore destination directory '{}'",
+                    destination.display()
+                )
+            })?;
+        } else if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create restore destination parent directory '{}'",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let source = format_path_with_trailing_slash(&source);
+        info!(server = %self.config.name, restore_mode = %mode, source = %source, destination = %destination.display(), "starting server restore");
+
+        run_rsync(&source, &destination, "restore", &self.config.name)?;
+
+        info!(server = %self.config.name, restore_mode = %mode, destination = %destination.display(), "server restore completed");
+        Ok(())
+    }
+
+    fn backup_root(&self) -> Result<&Path> {
+        self.backup_dir.as_deref().ok_or_else(|| {
+            anyhow!(
+                "Server '{}' requires global.backupDir for backup/restore operations.",
+                self.config.name
+            )
+        })
+    }
+
+    fn restore_paths(&self, mode: RestoreMode) -> Result<(PathBuf, PathBuf)> {
+        let backup_server_dir = self.backup_root()?.join(&self.config.name);
+
+        Ok(match mode {
+            RestoreMode::World => (
+                backup_server_dir.join("world"),
+                self.server_dir.join("world"),
+            ),
+            RestoreMode::All => (backup_server_dir, self.server_dir.clone()),
+        })
+    }
+}
+
+fn run_rsync(source: &str, destination: &Path, operation: &str, server_name: &str) -> Result<()> {
+    let status = Command::new("rsync")
+        .arg("-av")
+        .arg("--delete")
+        .arg(source)
+        .arg(destination)
+        .status()
+        .with_context(|| format!("Failed to run 'rsync' for server {operation}"))?;
+
+    if !status.success() {
+        error!(server = %server_name, operation, exit_code = ?status.code(), "server rsync operation failed");
+        bail!(
+            "{} failed for server '{}'. Return code: {:?}",
+            capitalize(operation),
+            server_name,
+            status.code()
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_path_exists(path: &Path, label: &str) -> Result<()> {
+    fs::metadata(path).with_context(|| {
+        format!(
+            "{} '{}' does not exist or is unreadable",
+            label,
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn confirm_restore(
+    server_id: &str,
+    server_name: &str,
+    mode: RestoreMode,
+    source: &Path,
+    destination: &Path,
+) -> Result<()> {
+    println!("Restore confirmation required");
+    println!("ID: {server_id}");
+    println!("Server: {server_name}");
+    println!("Mode: {mode}");
+    println!("Source: {}", source.display());
+    println!("Destination: {}", destination.display());
+    println!(
+        "This will overwrite destination files and delete destination files that are not present in the backup."
+    );
+
+    if !io::stdin().is_terminal() {
+        bail!("Cannot confirm restore because stdin is not a terminal");
+    }
+
+    print!("Type 'restore {server_id}' to continue: ");
+    io::stdout().flush().context("Failed to flush stdout")?;
+
+    let mut response = String::new();
+    io::stdin()
+        .read_line(&mut response)
+        .context("Failed to read restore confirmation")?;
+
+    if response.trim() == format!("restore {server_id}") {
+        Ok(())
+    } else {
+        bail!("Restore cancelled");
+    }
+}
+
+fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -436,5 +554,10 @@ mod tests {
             format_path_with_trailing_slash(&path),
             "/srv/servers/survival/"
         );
+    }
+
+    #[test]
+    fn capitalizes_operation_name() {
+        assert_eq!(capitalize("restore"), "Restore");
     }
 }

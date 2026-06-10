@@ -33,6 +33,9 @@ enum Commands {
     /// Backup the named server
     Backup { server: String },
 
+    /// Restore the named server from its configured backup
+    Restore { server: String },
+
     /// Restart the named server
     Restart { server: String },
 
@@ -61,6 +64,7 @@ pub enum Action {
     Start,
     Stop { stop_type: StopType },
     Backup,
+    Restore,
     Restart,
     Maintenance,
     Attach,
@@ -100,6 +104,7 @@ where
         Commands::Start { server } => (Action::Start, Some(server)),
         Commands::Stop { server, stop_type } => (Action::Stop { stop_type }, Some(server)),
         Commands::Backup { server } => (Action::Backup, Some(server)),
+        Commands::Restore { server } => (Action::Restore, Some(server)),
         Commands::Restart { server } => (Action::Restart, Some(server)),
         Commands::Maintenance => (Action::Maintenance, None),
         Commands::Attach { server } => (Action::Attach, Some(server)),
@@ -235,6 +240,15 @@ mod tests {
 
         assert!(matches!(request.action, Action::Maintenance));
         assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_restore_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "restore", "survival"])?;
+
+        assert!(matches!(request.action, Action::Restore));
+        assert_eq!(request.server.as_deref(), Some("survival"));
         Ok(())
     }
 

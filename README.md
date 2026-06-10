@@ -245,6 +245,7 @@ rconPort = 25575
 rconPassword = "change-me"
 enabled = true
 backup = true
+restore = "world"
 
 [servers.proxy]
 name = "velocity"
@@ -314,6 +315,7 @@ The `name` field is the real server directory and `screen` session name. Server 
 | `rconPassword` | Required for Minecraft | RCON password for Minecraft servers. |
 | `enabled` | No | Whether whole-fleet maintenance should start this server. Missing values are treated as `false` for maintenance. |
 | `backup` | No | Whether `backup` and `maintenance` should copy this server with `rsync`. Requires `global.backupDir` when true. |
+| `restore` | No | Restore scope for `clserver restore <id>`. Supported values are `"world"` and `"all"`. Defaults to `"world"`. |
 
 ## CLI usage
 
@@ -418,6 +420,23 @@ clserver backup survival
 
 If the target server is running, `backup` stops it, waits for the `screen` session to exit, runs the backup, and then starts it again. Minecraft servers use friendly shutdown for this flow; other server types use their configured `stopCommand`. If the server was already stopped, it is backed up without being started afterward.
 
+Restore a server from its local backup:
+
+```sh
+clserver restore survival
+```
+
+Restore always asks for confirmation before copying files back into the server directory. The configured `restore` mode controls what is restored:
+
+```toml
+restore = "world" # default; restore only the world directory
+restore = "all"   # restore the full server backup
+```
+
+TOML string values must be quoted, so use `restore = "world"`, not `restore = world`.
+
+If the target server is running, `restore` stops it, waits for the `screen` session to exit, performs the restore, and starts it again. If the server was already stopped, it is restored without being started afterward.
+
 Run daily maintenance across the configured fleet:
 
 ```sh
@@ -438,6 +457,8 @@ Maintenance performs this workflow:
 
 ## How backups work
 
+Backups and restores use `rsync --delete`, so the destination is made to match the source. For restore operations, that means destination files that do not exist in the backup can be deleted.
+
 Backups use `rsync` and copy:
 
 ```text
@@ -451,6 +472,30 @@ to:
 ```
 
 The trailing slash on the source is intentional: it backs up the contents of the server directory into the per-server backup directory. `--delete` removes files from the backup that no longer exist in the source.
+
+Restore mode `"world"` copies:
+
+```text
+<global.backupDir>/<server name>/world/
+```
+
+to:
+
+```text
+<global.serverDir>/<server name>/world
+```
+
+Restore mode `"all"` copies:
+
+```text
+<global.backupDir>/<server name>/
+```
+
+to:
+
+```text
+<global.serverDir>/<server name>
+```
 
 ## How servers are started
 

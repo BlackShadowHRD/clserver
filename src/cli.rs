@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "clServer",
-    about = "Manage CatLord Minecraft and Velocity servers"
+    name = "clserver",
+    about = "Manage CatLord Minecraft, Hytale and Velocity servers"
 )]
 struct Cli {
     /// Enable verbose logging for debugging details such as generated start commands

@@ -513,29 +513,117 @@ fn list_servers(config: &Config) -> Result<()> {
     let mut servers: Vec<_> = config.servers.iter().collect();
     servers.sort_by(|(a_id, a), (b_id, b)| a_id.cmp(b_id).then_with(|| a.name.cmp(&b.name)));
 
-    println!("{:<16} {:<24} {:<10} STATUS", "ID", "SERVER", "TYPE");
-    for (server_id, server_config) in servers {
-        let manager = ServerManager::new(
-            server_id.clone(),
-            server_config.clone(),
-            &config.global,
-            &config.java_environments,
-        )?;
-        let status = if manager.screen_session_exists()? {
-            "running"
-        } else {
-            "stopped"
-        };
+    let rows = servers
+        .into_iter()
+        .map(|(server_id, server_config)| {
+            let manager = ServerManager::new(
+                server_id.clone(),
+                server_config.clone(),
+                &config.global,
+                &config.java_environments,
+            )?;
+            let status = if manager.screen_session_exists()? {
+                "running"
+            } else {
+                "stopped"
+            };
 
+            Ok(ListRow {
+                id: manager.server_id,
+                server: manager.config.name,
+                server_type: manager.config.server_type.to_string(),
+                status: status.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    print_list_rows(&rows);
+    Ok(())
+}
+
+struct ListRow {
+    id: String,
+    server: String,
+    server_type: String,
+    status: String,
+}
+
+fn print_list_rows(rows: &[ListRow]) {
+    let id_width = list_column_width("ID", rows.iter().map(|row| row.id.as_str()));
+    let server_width = list_column_width("SERVER", rows.iter().map(|row| row.server.as_str()));
+    let type_width = list_column_width("TYPE", rows.iter().map(|row| row.server_type.as_str()));
+
+    println!(
+        "{}",
+        format_list_row(
+            "ID",
+            "SERVER",
+            "TYPE",
+            "STATUS",
+            id_width,
+            server_width,
+            type_width
+        )
+    );
+
+    for row in rows {
         println!(
-            "{:<16} {:<24} {:<10} {}",
-            manager.server_id, manager.config.name, manager.config.server_type, status
+            "{}",
+            format_list_row(
+                &row.id,
+                &row.server,
+                &row.server_type,
+                &row.status,
+                id_width,
+                server_width,
+                type_width,
+            )
         );
     }
+}
 
-    Ok(())
+fn list_column_width<'a>(header: &str, values: impl Iterator<Item = &'a str>) -> usize {
+    values.map(str::len).max().unwrap_or(0).max(header.len())
+}
+
+fn format_list_row(
+    id: &str,
+    server: &str,
+    server_type: &str,
+    status: &str,
+    id_width: usize,
+    server_width: usize,
+    type_width: usize,
+) -> String {
+    format!("{id:<id_width$}  {server:<server_width$}  {server_type:<type_width$}  {status}",)
 }
 
 fn no_server_action_unreachable() -> Result<()> {
     unreachable!("no-server actions are handled before per-server dispatch")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_column_width_uses_longest_value_or_header() {
+        assert_eq!(list_column_width("ID", ["CLS4", "proxy"].into_iter()), 5);
+        assert_eq!(list_column_width("SERVER", ["one", "two"].into_iter()), 6);
+    }
+
+    #[test]
+    fn formats_list_rows_with_dynamic_widths() {
+        let row = format_list_row(
+            "very-long-id",
+            "CatLordSurvival",
+            "minecraft",
+            "running",
+            "very-long-id".len(),
+            "CatLordSurvival".len(),
+            "minecraft".len(),
+        );
+
+        assert_eq!(row, "very-long-id  CatLordSurvival  minecraft  running");
+    }
 }

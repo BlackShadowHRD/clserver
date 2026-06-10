@@ -5,8 +5,9 @@ use std::fmt;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use toml_edit::{DocumentMut, Item, Value};
 
-/// Top-level application configuration loaded from `cls.toml`.
+/// Top-level application configuration loaded from `clserver.toml`.
 ///
 /// The config file is expected to contain global paths, named Java environments,
 /// and one or more configured servers under `[servers.<name>]` tables. Serde
@@ -143,16 +144,11 @@ pub struct ServerConfig {
     pub backup: Option<bool>,
 }
 
-/// Load, parse, and validate the user's `cls.toml` configuration file.
+/// Load, parse, and validate the user's `clserver.toml` configuration file.
 ///
 /// The file path is resolved by `crate::paths::config_file`. TOML syntax errors
 /// are reported separately from semantic validation errors so users can tell
 /// whether the file is malformed or merely incomplete.
-///
-/// After structural validation, Minecraft RCON passwords are compared against
-/// each server's `server.properties` file when it is available. If the password
-/// in `cls.toml` does not match `server.properties`, the user is prompted to use
-/// the `server.properties` value for the current run.
 pub fn load_config() -> Result<Config> {
     let config_file = crate::paths::config_file()?;
 
@@ -163,9 +159,8 @@ pub fn load_config() -> Result<Config> {
         )
     })?;
 
-    let mut config: Config = toml::from_str(&text).context("Invalid TOML file")?;
+    let config: Config = toml_edit::de::from_str(&text).context("Invalid TOML file")?;
     validate_config(&config)?;
-    reconcile_minecraft_rcon_passwords(&mut config)?;
     Ok(config)
 }
 
@@ -336,69 +331,74 @@ fn is_blank_path(value: &Path) -> bool {
     value.as_os_str().to_string_lossy().trim().is_empty()
 }
 
-/// Compare Minecraft RCON passwords against `server.properties` when available.
+/// Compare one Minecraft server's RCON password against `server.properties` when available.
 ///
 /// Minecraft stores its active RCON password in `server.properties`. If the
-/// password configured in `cls.toml` differs, RCON commands will fail even though
+/// password configured in `clserver.toml` differs, RCON commands will fail even though
 /// the clServer config looks valid. In that case, prompt the user to trust the
 /// `server.properties` value for the current process.
 ///
-/// This function does not rewrite `cls.toml`; it updates the in-memory config so
+/// This function does not rewrite `clserver.toml`; it updates the in-memory config so
 /// the requested command can continue safely. The prompt tells the user to update
-/// `cls.toml` manually so future runs stay consistent.
-fn reconcile_minecraft_rcon_passwords(config: &mut Config) -> Result<()> {
+/// `clserver.toml` manually so future runs stay consistent.
+///
+/// This should only be called for actions that actually need RCON, such as
+/// Minecraft stop/restart. Commands like `status` and `list` should not prompt
+/// for unrelated RCON password mismatches.
+pub fn reconcile_minecraft_rcon_password(config: &mut Config, server_name: &str) -> Result<()> {
     let server_dir = config.global.server_dir.clone();
+    let server = config
+        .servers
+        .get_mut(server_name)
+        .ok_or_else(|| anyhow!("Server '{server_name}' not found in configuration file."))?;
 
-    for server in config.servers.values_mut() {
-        if server.server_type != ServerType::Minecraft {
-            continue;
+    if server.server_type != ServerType::Minecraft {
+        return Ok(());
+    }
+
+    let properties_file = server_dir.join(&server.name).join("server.properties");
+    let properties_text = match fs::read_to_string(&properties_file) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to read server.properties for Minecraft server '{}' at '{}'",
+                    server.name,
+                    properties_file.display()
+                )
+            });
         }
+    };
 
-        let properties_file = server_dir.join(&server.name).join("server.properties");
-        let properties_text = match fs::read_to_string(&properties_file) {
-            Ok(text) => text,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
-                        "Failed to read server.properties for Minecraft server '{}' at '{}'",
-                        server.name,
-                        properties_file.display()
-                    )
-                });
-            }
-        };
+    let Some(properties_password) = parse_server_properties_rcon_password(&properties_text) else {
+        return Ok(());
+    };
+    let Some(config_password) = server.rcon_password.as_deref() else {
+        return Ok(());
+    };
 
-        let Some(properties_password) = parse_server_properties_rcon_password(&properties_text)
-        else {
-            continue;
-        };
-        let Some(config_password) = server.rcon_password.as_deref() else {
-            continue;
-        };
+    if config_password == properties_password {
+        return Ok(());
+    }
 
-        if config_password == properties_password {
-            continue;
-        }
-
-        if prompt_to_use_server_properties_rcon_password(&server.name, &properties_file)? {
-            server.rcon_password = Some(properties_password);
-            tracing::info!(
-                server = %server.name,
-                properties_file = %properties_file.display(),
-                "using RCON password from server.properties for current run"
-            );
-            println!(
-                "Using RCON password from server.properties for server '{}'. Please update cls.toml to keep future runs in sync.",
-                server.name
-            );
-        } else {
-            bail!(
-                "RCON password mismatch for server '{}'. Update cls.toml to match '{}' or rerun and accept the server.properties value.",
-                server.name,
-                properties_file.display()
-            );
-        }
+    if prompt_to_use_server_properties_rcon_password(&server.name, &properties_file)? {
+        server.rcon_password = Some(properties_password);
+        tracing::info!(
+            server = %server.name,
+            properties_file = %properties_file.display(),
+            "using RCON password from server.properties for current run"
+        );
+        println!(
+            "Using RCON password from server.properties for server '{}'. Please update clserver.toml to keep future runs in sync.",
+            server.name
+        );
+    } else {
+        bail!(
+            "RCON password mismatch for server '{}'. Update clserver.toml to match '{}' or rerun and accept the server.properties value.",
+            server.name,
+            properties_file.display()
+        );
     }
 
     Ok(())
@@ -436,7 +436,7 @@ fn prompt_to_use_server_properties_rcon_password(
 ) -> Result<bool> {
     if !io::stdin().is_terminal() {
         bail!(
-            "RCON password mismatch for server '{server_name}', but stdin is not interactive. Update cls.toml to match '{}'.",
+            "RCON password mismatch for server '{server_name}', but stdin is not interactive. Update clserver.toml to match '{}'.",
             properties_file.display()
         );
     }
@@ -444,6 +444,196 @@ fn prompt_to_use_server_properties_rcon_password(
     print!(
         "RCON password mismatch for server '{server_name}'. Use password from '{}' for this run? [y/N] ",
         properties_file.display()
+    );
+    io::stdout().flush().context("Failed to flush prompt")?;
+
+    let mut response = String::new();
+    io::stdin()
+        .read_line(&mut response)
+        .context("Failed to read prompt response")?;
+
+    Ok(matches!(
+        response.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+#[derive(Debug)]
+struct RconPasswordMismatch {
+    server_key: String,
+    server_name: String,
+    properties_file: PathBuf,
+    properties_password: String,
+}
+
+pub fn validate_or_fix_minecraft_rcon_passwords(config: &Config, fix: bool) -> Result<()> {
+    let mismatches = find_minecraft_rcon_password_mismatches(config)?;
+
+    if mismatches.is_empty() {
+        println!("Configuration is valid.");
+        return Ok(());
+    }
+
+    if !fix {
+        println!("Configuration is structurally valid, but RCON password mismatches were found:");
+        for mismatch_ in &mismatches {
+            println!(
+                "- Minecraft server '{}': clserver.toml rconPassword differs from {}",
+                mismatch_.server_name,
+                mismatch_.properties_file.display()
+            );
+        }
+        println!();
+        println!(
+            "Run `clserver validate-config --fix` to update clserver.toml from server.properties."
+        );
+        bail!("RCON password mismatches found");
+    }
+
+    fix_minecraft_rcon_passwords(&mismatches)
+}
+
+fn find_minecraft_rcon_password_mismatches(config: &Config) -> Result<Vec<RconPasswordMismatch>> {
+    let mut mismatches = Vec::new();
+
+    for (server_key, server) in &config.servers {
+        if let Some(mismatch_) =
+            minecraft_rcon_password_mismatch(&config.global.server_dir, server_key, server)?
+        {
+            mismatches.push(mismatch_);
+        }
+    }
+
+    mismatches.sort_by(|a, b| a.server_name.cmp(&b.server_name));
+    Ok(mismatches)
+}
+
+fn minecraft_rcon_password_mismatch(
+    server_dir: &Path,
+    server_key: &str,
+    server: &ServerConfig,
+) -> Result<Option<RconPasswordMismatch>> {
+    if server.server_type != ServerType::Minecraft {
+        return Ok(None);
+    }
+
+    let properties_file = server_dir.join(&server.name).join("server.properties");
+    let properties_text = match fs::read_to_string(&properties_file) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to read server.properties for Minecraft server '{}' at '{}'",
+                    server.name,
+                    properties_file.display()
+                )
+            });
+        }
+    };
+
+    let Some(properties_password) = parse_server_properties_rcon_password(&properties_text) else {
+        return Ok(None);
+    };
+    let Some(config_password) = server.rcon_password.as_deref() else {
+        return Ok(None);
+    };
+
+    if config_password == properties_password {
+        return Ok(None);
+    }
+
+    Ok(Some(RconPasswordMismatch {
+        server_key: server_key.to_string(),
+        server_name: server.name.clone(),
+        properties_file,
+        properties_password,
+    }))
+}
+
+fn fix_minecraft_rcon_passwords(mismatches: &[RconPasswordMismatch]) -> Result<()> {
+    let config_file = crate::paths::config_file()?;
+    let text = fs::read_to_string(&config_file).with_context(|| {
+        format!(
+            "Configuration file '{}' not found or unreadable",
+            config_file.display()
+        )
+    })?;
+    let mut document: DocumentMut = text
+        .parse()
+        .with_context(|| format!("Failed to parse '{}' for editing", config_file.display()))?;
+
+    let mut fixed = 0;
+    let mut skipped = 0;
+
+    for mismatch_ in mismatches {
+        if prompt_to_update_toml_rcon_password(mismatch_)? {
+            document["servers"][mismatch_.server_key.as_str()]["rconPassword"] =
+                literal_string_item(&mismatch_.properties_password).with_context(|| {
+                    format!(
+                        "Failed to format rconPassword for server '{}' as a TOML literal string",
+                        mismatch_.server_name
+                    )
+                })?;
+            fixed += 1;
+            println!(
+                "Updated rconPassword for server '{}' from server.properties.",
+                mismatch_.server_name
+            );
+        } else {
+            skipped += 1;
+        }
+    }
+
+    if fixed > 0 {
+        fs::write(&config_file, document.to_string())
+            .with_context(|| format!("Failed to write '{}'", config_file.display()))?;
+        println!(
+            "Updated {} server configuration(s) in {}.",
+            fixed,
+            config_file.display()
+        );
+    }
+
+    if skipped > 0 {
+        bail!(
+            "{} RCON password mismatch(es) remain. Re-run `clserver validate-config --fix` or update clserver.toml manually.",
+            skipped
+        );
+    }
+
+    println!("Configuration is valid.");
+    Ok(())
+}
+
+fn literal_string_item(value: &str) -> Result<Item> {
+    if value.contains('\'') {
+        bail!(
+            "Cannot write rconPassword as a single-quoted TOML literal string because it contains a single quote. Update clserver.toml manually for this server."
+        );
+    }
+
+    let literal = format!("'{value}'");
+    let value = literal
+        .parse::<Value>()
+        .with_context(|| "Password cannot be represented as a single-line TOML literal string")?;
+
+    Ok(Item::Value(value))
+}
+
+fn prompt_to_update_toml_rcon_password(mismatch_: &RconPasswordMismatch) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        bail!(
+            "RCON password mismatch for server '{}', but stdin is not interactive. Update clserver.toml to match '{}'.",
+            mismatch_.server_name,
+            mismatch_.properties_file.display()
+        );
+    }
+
+    print!(
+        "RCON password mismatch for server '{}'. Update clserver.toml from '{}'? [y/N] ",
+        mismatch_.server_name,
+        mismatch_.properties_file.display()
     );
     io::stdout().flush().context("Failed to flush prompt")?;
 
@@ -495,7 +685,7 @@ mod tests {
     use super::*;
 
     fn parse_config(toml: &str) -> Config {
-        toml::from_str(toml).expect("test config should parse")
+        toml_edit::de::from_str(toml).expect("test config should parse")
     }
 
     #[test]
@@ -641,6 +831,22 @@ mod tests {
         );
 
         assert_eq!(password, None);
+    }
+
+    #[test]
+    fn formats_rcon_password_fix_as_literal_string() -> Result<()> {
+        let item = literal_string_item(r#"abc\def$%^"#)?;
+
+        assert_eq!(item.to_string(), r#"'abc\def$%^'"#);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_literal_string_format_for_password_with_single_quote() {
+        let error = literal_string_item("abc'def")
+            .expect_err("single quotes cannot be represented in single-line literal strings");
+
+        assert!(error.to_string().contains("single quote"));
     }
 
     #[test]

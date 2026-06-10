@@ -106,22 +106,29 @@ clserver --help
 Create the config directory for the user that will run `clServer`:
 
 ```sh
-mkdir -p ~/.config/cls
+mkdir -p ~/.config/clserver
 ```
 
 Create or copy the config file to:
 
 ```text
-~/.config/cls/cls.toml
+~/.config/clserver/clserver.toml
 ```
 
 If `XDG_CONFIG_HOME` is set, the config path is instead:
 
 ```text
-$XDG_CONFIG_HOME/cls/cls.toml
+$XDG_CONFIG_HOME/clserver/clserver.toml
 ```
 
-Make sure the paths in `cls.toml` match the server filesystem, especially:
+If you previously used an older `clServer` build, move your config from the legacy path:
+
+```sh
+mkdir -p ~/.config/clserver
+mv ~/.config/cls/cls.toml ~/.config/clserver/clserver.toml
+```
+
+Make sure the paths in `clserver.toml` match the server filesystem, especially:
 
 - `global.serverDir`
 - `global.logDir`
@@ -133,13 +140,13 @@ Make sure the paths in `cls.toml` match the server filesystem, especially:
 Application logs are written to:
 
 ```text
-$XDG_STATE_HOME/cls/clserver.log
+$XDG_STATE_HOME/clserver/clserver.log
 ```
 
 If `XDG_STATE_HOME` is not set, this is usually:
 
 ```text
-~/.local/state/cls/clserver.log
+~/.local/state/clserver/clserver.log
 ```
 
 Per-server `screen` logs are written under:
@@ -159,7 +166,7 @@ clserver status <server-name>
 Then check the application log:
 
 ```sh
-tail -n 50 ~/.local/state/cls/clserver.log
+tail -n 50 ~/.local/state/clserver/clserver.log
 ```
 
 If the server should be running, check that `screen` can see the session:
@@ -193,25 +200,27 @@ clserver --help
 `clServer` reads its configuration from:
 
 ```text
-$XDG_CONFIG_HOME/cls/cls.toml
+$XDG_CONFIG_HOME/clserver/clserver.toml
 ```
 
 On most Linux systems, if `XDG_CONFIG_HOME` is not set, this is usually:
 
 ```text
-~/.config/cls/cls.toml
+~/.config/clserver/clserver.toml
 ```
+
+Older versions used `~/.config/cls/cls.toml`. If you are upgrading, move that file to the new path.
 
 Create the config directory if it does not already exist:
 
 ```sh
-mkdir -p ~/.config/cls
+mkdir -p ~/.config/clserver
 ```
 
 Then create:
 
 ```text
-~/.config/cls/cls.toml
+~/.config/clserver/clserver.toml
 ```
 
 ### Example configuration
@@ -313,6 +322,26 @@ The verbose flag is global, so this is also valid:
 clserver start survival --verbose
 ```
 
+Validate the configuration file:
+
+```sh
+clserver validate-config
+```
+
+This also checks Minecraft `rconPassword` values against `server.properties` where available. If mismatches are found, the command prints a hint to run:
+
+```sh
+clserver validate-config --fix
+```
+
+With `--fix`, `clServer` prompts before updating each mismatched `rconPassword` in `clserver.toml` from the corresponding `server.properties` value. Password values are never printed. Updated passwords are written as single-quoted TOML literal strings, which is safer for generated passwords containing characters such as backslashes.
+
+List all configured servers and whether their `screen` sessions are running:
+
+```sh
+clserver list
+```
+
 Start a server:
 
 ```sh
@@ -402,13 +431,13 @@ Generated start commands are not written to the command log by default, because 
 `clServer` uses `tracing` for application logs. Logs are written to stderr for interactive feedback and to a persistent log file in the user state directory:
 
 ```text
-$XDG_STATE_HOME/cls/clserver.log
+$XDG_STATE_HOME/clserver/clserver.log
 ```
 
 On most Linux systems, if `XDG_STATE_HOME` is not set, this is usually:
 
 ```text
-~/.local/state/cls/clserver.log
+~/.local/state/clserver/clserver.log
 ```
 
 This is the preferred location for the persistent application log because it is runtime state, not user-editable configuration. Normal runs emit `INFO` and above. Passing `--verbose` or `-v` enables `DEBUG` logs, including generated start commands.
@@ -435,9 +464,19 @@ rcon.port=25575
 rcon.password=change-me
 ```
 
-The values must match the server's `rconPort` and `rconPassword` in `cls.toml`.
+The values must match the server's `rconPort` and `rconPassword` in `clserver.toml`. You can check all configured Minecraft servers with:
 
-When `server.properties` is available, `clServer` checks its `rcon.password` value against `cls.toml` while loading the config. If the two passwords differ, you will be prompted to use the `server.properties` password for the current run. If the command is running non-interactively, config loading fails and asks you to update `cls.toml` manually.
+```sh
+clserver validate-config
+```
+
+If password mismatches are reported, you can choose to update `clserver.toml` from `server.properties` with the following command. Updated passwords are written as single-quoted TOML literal strings:
+
+```sh
+clserver validate-config --fix
+```
+
+When `server.properties` is available, `clServer` checks its `rcon.password` value against `clserver.toml` for the targeted Minecraft server before actions that need RCON, such as `stop` and `restart`. If the two passwords differ, you will be prompted to use the `server.properties` password for the current run. If the command is running non-interactively, the command fails and asks you to update `clserver.toml` manually. Commands that do not need RCON, such as `status` and `list`, do not perform this password check.
 
 ## Development
 

@@ -13,13 +13,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Minecraft RCON password consistency check against `server.properties`.
 - Global `--verbose` / `-v` CLI option for debugging logs.
 - Useful `status` output for configured servers, including screen state, paths, latest log, Java executable, and configured capability summary.
-- `tracing`-based application logging with stderr output and persistent file logging under `$XDG_STATE_HOME/cls/clserver.log`.
+- `list` command showing all configured servers with type and running/stopped state.
+- `validate-config` command for checking configuration validity and Minecraft RCON password consistency without targeting a server.
+- `validate-config --fix` option to prompt before updating mismatched `rconPassword` values in `clserver.toml` from `server.properties`, writing passwords as single-quoted TOML literal strings.
+- `tracing`-based application logging with stderr output and persistent file logging under `$XDG_STATE_HOME/clserver/clserver.log`.
 - Unit tests for configuration validation, `server.properties` RCON password parsing, and CLI subcommand parsing.
 
 ### Changed
 
 - Configuration loading now fails early when required global, Java, or server fields are invalid.
-- Minecraft server loading now prompts when `cls.toml` and `server.properties` contain different RCON passwords.
+- Minecraft RCON password mismatch prompts now run only for the targeted server and only for actions that need RCON (`stop` and `restart`).
 - Failed external `screen` commands now return errors instead of being logged as failures while exiting successfully.
 - Filesystem errors while creating/opening/writing log files now include context and are propagated instead of being ignored.
 - Internal server and global filesystem paths now use `PathBuf` instead of string concatenation.
@@ -30,6 +33,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Application logic has been split into `src/lib.rs`, leaving `src/main.rs` as a minimal binary entry point.
 - Removed `unwrap()` usage in production RCON parsing and CLI tests.
 - Replaced custom application logging with `tracing` events and level-based verbose logging.
+- Replaced `toml` dependency with `toml_edit 0.25.12` for both deserialization and targeted config edits.
+- XDG config and state paths now use `clserver` instead of the legacy short name `cls`:
+  - `$XDG_CONFIG_HOME/clserver/clserver.toml`
+  - `$XDG_STATE_HOME/clserver/clserver.log`
 
 ### Fixed
 
@@ -40,13 +47,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Rust CLI application for managing configured game servers.
-- Configuration loading from `$XDG_CONFIG_HOME/cls/cls.toml`.
+- Configuration loading from `$XDG_CONFIG_HOME/clserver/clserver.toml`.
 - Global configuration for server and log directories.
 - Per-server configuration for Minecraft, Velocity, and Hytale server types.
 - Java environment resolution through `[java_environments]`.
 - Server startup in detached `screen` sessions.
 - Per-server `screen` log file generation.
-- Global command logging under `$XDG_STATE_HOME/cls/clserver.log`.
+- Global command logging under `$XDG_STATE_HOME/clserver/clserver.log`.
 - Minecraft RCON client support.
 - Minecraft immediate stop support through RCON `stop` command.
 - Minecraft friendly stop support with player-count check and shutdown warnings.

@@ -40,6 +40,16 @@ enum Commands {
 
     /// Show status information for the named server
     Status { server: String },
+
+    /// List all configured servers and whether their screen sessions are running
+    List,
+
+    /// Validate the configuration file and exit
+    ValidateConfig {
+        /// Offer to update mismatched Minecraft RCON passwords in clserver.toml
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -50,6 +60,8 @@ pub enum Action {
     Restart,
     Attach,
     Status,
+    List,
+    ValidateConfig { fix: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -61,7 +73,7 @@ pub enum StopType {
 #[derive(Debug)]
 pub struct Request {
     pub action: Action,
-    pub server: String,
+    pub server: Option<String>,
     pub verbose: bool,
 }
 
@@ -77,12 +89,14 @@ where
     let cli = Cli::try_parse_from(args)?;
 
     let (action, server) = match cli.command {
-        Commands::Start { server } => (Action::Start, server),
-        Commands::Stop { server, stop_type } => (Action::Stop { stop_type }, server),
-        Commands::Backup { server } => (Action::Backup, server),
-        Commands::Restart { server } => (Action::Restart, server),
-        Commands::Attach { server } => (Action::Attach, server),
-        Commands::Status { server } => (Action::Status, server),
+        Commands::Start { server } => (Action::Start, Some(server)),
+        Commands::Stop { server, stop_type } => (Action::Stop { stop_type }, Some(server)),
+        Commands::Backup { server } => (Action::Backup, Some(server)),
+        Commands::Restart { server } => (Action::Restart, Some(server)),
+        Commands::Attach { server } => (Action::Attach, Some(server)),
+        Commands::Status { server } => (Action::Status, Some(server)),
+        Commands::List => (Action::List, None),
+        Commands::ValidateConfig { fix } => (Action::ValidateConfig { fix }, None),
     };
 
     let request = Request {
@@ -103,7 +117,7 @@ mod tests {
         let request = parse_request_from(["clserver", "start", "survival"])?;
 
         assert!(matches!(request.action, Action::Start));
-        assert_eq!(request.server, "survival");
+        assert_eq!(request.server.as_deref(), Some("survival"));
         assert!(!request.verbose);
         Ok(())
     }
@@ -113,7 +127,7 @@ mod tests {
         let request = parse_request_from(["clserver", "--verbose", "start", "survival"])?;
 
         assert!(matches!(request.action, Action::Start));
-        assert_eq!(request.server, "survival");
+        assert_eq!(request.server.as_deref(), Some("survival"));
         assert!(request.verbose);
         Ok(())
     }
@@ -123,7 +137,7 @@ mod tests {
         let request = parse_request_from(["clserver", "start", "survival", "--verbose"])?;
 
         assert!(matches!(request.action, Action::Start));
-        assert_eq!(request.server, "survival");
+        assert_eq!(request.server.as_deref(), Some("survival"));
         assert!(request.verbose);
         Ok(())
     }
@@ -138,7 +152,7 @@ mod tests {
                 stop_type: StopType::Immediate
             }
         ));
-        assert_eq!(request.server, "survival");
+        assert_eq!(request.server.as_deref(), Some("survival"));
         Ok(())
     }
 
@@ -152,7 +166,7 @@ mod tests {
                 stop_type: StopType::Friendly
             }
         ));
-        assert_eq!(request.server, "survival");
+        assert_eq!(request.server.as_deref(), Some("survival"));
         Ok(())
     }
 
@@ -175,6 +189,39 @@ mod tests {
                 stop_type: StopType::Immediate
             }
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_list_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "list"])?;
+
+        assert!(matches!(request.action, Action::List));
+        assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_validate_config_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "validate-config"])?;
+
+        assert!(matches!(
+            request.action,
+            Action::ValidateConfig { fix: false }
+        ));
+        assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_validate_config_fix_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "validate-config", "--fix"])?;
+
+        assert!(matches!(
+            request.action,
+            Action::ValidateConfig { fix: true }
+        ));
+        assert_eq!(request.server, None);
         Ok(())
     }
 

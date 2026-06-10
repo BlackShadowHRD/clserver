@@ -10,13 +10,13 @@ use tracing_subscriber::prelude::*;
 /// under the XDG state directory. For this CLI, the best persistent location is:
 ///
 /// ```text
-/// $XDG_STATE_HOME/cls/clserver.log
+/// $XDG_STATE_HOME/clserver/clserver.log
 /// ```
 ///
 /// When `XDG_STATE_HOME` is not set, this normally resolves to:
 ///
 /// ```text
-/// ~/.local/state/cls/clserver.log
+/// ~/.local/state/clserver/clserver.log
 /// ```
 ///
 /// That location is appropriate because command history and operational logs are

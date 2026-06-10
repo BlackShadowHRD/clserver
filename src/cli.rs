@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[derive(Parser, Debug)]
 #[command(
     name = "clserver",
+    version,
     about = "Manage CatLord Minecraft, Hytale and Velocity servers"
 )]
 struct Cli {
@@ -116,6 +117,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn parses_version_flag() {
+        let error = Cli::try_parse_from(["clserver", "--version"])
+            .expect_err("version flag should short-circuit parsing");
+
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn parses_short_version_flag() {
+        let error = Cli::try_parse_from(["clserver", "-V"])
+            .expect_err("short version flag should short-circuit parsing");
+
+        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+        assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
 
     #[test]
     fn parses_start_subcommand() -> Result<()> {

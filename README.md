@@ -323,6 +323,13 @@ Display help:
 clserver --help
 ```
 
+Display the installed version:
+
+```sh
+clserver --version
+clserver -V
+```
+
 Enable verbose logging for debugging details:
 
 ```sh

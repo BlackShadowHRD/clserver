@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `maintenance` command for daily fleet maintenance with Velocity-first handling and parallel backend stop/backup/start processing.
 - `enabled` server setting for maintenance restart decisions.
 - `global.backupDir` setting and `rsync`-based server backups.
+- `--version` / `-V` CLI flag powered by the Cargo package version.
 
 ### Changed
 

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -12,6 +13,10 @@ struct Cli {
     /// Enable verbose logging for debugging details such as generated start commands
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Override the default config file path
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -141,6 +146,7 @@ pub struct Request {
     pub action: Action,
     pub server: Option<String>,
     pub verbose: bool,
+    pub config: Option<PathBuf>,
 }
 
 pub fn parse_request() -> Result<Request> {
@@ -180,6 +186,7 @@ where
         action,
         server,
         verbose: cli.verbose,
+        config: cli.config,
     };
 
     Ok(request)
@@ -269,6 +276,44 @@ mod tests {
         assert!(matches!(request.action, Action::Start));
         assert_eq!(request.server.as_deref(), Some("survival"));
         assert!(request.verbose);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_config_flag_before_subcommand() -> Result<()> {
+        let request = parse_request_from([
+            "clserver",
+            "--config",
+            "/tmp/clserver-test.toml",
+            "start",
+            "survival",
+        ])?;
+
+        assert!(matches!(request.action, Action::Start));
+        assert_eq!(request.server.as_deref(), Some("survival"));
+        assert_eq!(
+            request.config,
+            Some(PathBuf::from("/tmp/clserver-test.toml"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_config_flag_after_subcommand() -> Result<()> {
+        let request = parse_request_from([
+            "clserver",
+            "start",
+            "survival",
+            "--config",
+            "/tmp/clserver-test.toml",
+        ])?;
+
+        assert!(matches!(request.action, Action::Start));
+        assert_eq!(request.server.as_deref(), Some("survival"));
+        assert_eq!(
+            request.config,
+            Some(PathBuf::from("/tmp/clserver-test.toml"))
+        );
         Ok(())
     }
 

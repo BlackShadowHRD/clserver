@@ -389,6 +389,15 @@ The verbose flag is global, so this is also valid:
 clserver start survival --verbose
 ```
 
+Use a non-default config file for staging or testing:
+
+```sh
+clserver --config /path/to/clserver.toml validate-config
+clserver start survival --config /path/to/clserver.toml
+```
+
+The `--config` flag is global, so it can appear before or after the subcommand. If omitted, `clserver` uses `$XDG_CONFIG_HOME/clserver/clserver.toml`.
+
 Validate the configuration file:
 
 ```sh

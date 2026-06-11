@@ -30,6 +30,6 @@ pub fn run() -> Result<()> {
 }
 
 fn run_with_request(request: cli::Request) -> Result<()> {
-    let config = config::load_config()?;
+    let config = config::load_config(request.config.as_deref())?;
     server::dispatch_request(request, config)
 }

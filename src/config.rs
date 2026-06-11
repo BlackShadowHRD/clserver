@@ -190,11 +190,15 @@ pub struct ServerConfig {
 
 /// Load, parse, and validate the user's `clserver.toml` configuration file.
 ///
-/// The file path is resolved by `crate::paths::config_file`. TOML syntax errors
-/// are reported separately from semantic validation errors so users can tell
-/// whether the file is malformed or merely incomplete.
-pub fn load_config() -> Result<Config> {
-    let config_file = crate::paths::config_file()?;
+/// If `config_file` is `None`, the file path is resolved by
+/// `crate::paths::config_file`. TOML syntax errors are reported separately from
+/// semantic validation errors so users can tell whether the file is malformed or
+/// merely incomplete.
+pub fn load_config(config_file: Option<&Path>) -> Result<Config> {
+    let config_file = match config_file {
+        Some(config_file) => config_file.to_path_buf(),
+        None => crate::paths::config_file()?,
+    };
 
     let text = fs::read_to_string(&config_file).with_context(|| {
         format!(

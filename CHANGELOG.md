@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Restic-based remote backups tagged by clServer, server ID, and server name.
 - Remote backup cleanup using `restic forget --keep-daily 56 --prune`.
 - Optional `[backup].resticEnvFile` setting so `clserver` can load restic environment variables itself.
+- `validate-config` now checks restic repository/password settings when backups are enabled.
 - `--version` / `-V` CLI flag powered by the Cargo package version.
 - `restore <server>` command for restoring either the `world` directory or the full server backup with confirmation.
 - Per-server `restore` setting with supported values `"world"` and `"all"`, defaulting to `"world"`.

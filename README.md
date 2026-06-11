@@ -368,7 +368,7 @@ Validate the configuration file:
 clserver validate-config
 ```
 
-This also checks Minecraft `rconPassword` values against `server.properties` where available. If mismatches are found, the command prints a hint to run:
+This also checks Minecraft `rconPassword` values against `server.properties` where available. If any server has `backup = true`, it also validates that local mirror and restic remote backup settings are usable, including required restic repository/password environment variables. If RCON password mismatches are found, the command prints a hint to run:
 
 ```sh
 clserver validate-config --fix

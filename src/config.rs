@@ -264,10 +264,12 @@ pub fn validate_config(config: &Config) -> Result<()> {
         validate_server_config(server_key, server, config, &mut errors);
     }
 
-    if config
+    let any_backup_enabled = config
         .servers
         .values()
-        .any(|server| server.backup.unwrap_or(false))
+        .any(|server| server.backup.unwrap_or(false));
+
+    if any_backup_enabled
         && config
             .backup
             .local_dir
@@ -277,11 +279,148 @@ pub fn validate_config(config: &Config) -> Result<()> {
         errors.push("backup.localDir is required when any server has backup = true".to_string());
     }
 
+    if any_backup_enabled {
+        validate_restic_environment_config(&config.backup, &mut errors);
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
         bail!("Invalid configuration:\n- {}", errors.join("\n- "))
     }
+}
+
+fn validate_restic_environment_config(backup: &BackupConfig, errors: &mut Vec<String>) {
+    let entries = if let Some(env_file) = backup.restic_env_file.as_ref() {
+        match load_restic_env_file(env_file) {
+            Ok(entries) => entries,
+            Err(err) => {
+                errors.push(format!("backup.resticEnvFile is invalid: {err:#}"));
+                return;
+            }
+        }
+    } else {
+        std::env::vars().collect()
+    };
+
+    if restic_env_value(&entries, "RESTIC_REPOSITORY").is_none() {
+        errors.push(restic_missing_setting_message(
+            "RESTIC_REPOSITORY",
+            backup.restic_env_file.as_ref(),
+        ));
+    }
+
+    if restic_env_value(&entries, "RESTIC_PASSWORD").is_none()
+        && restic_env_value(&entries, "RESTIC_PASSWORD_FILE").is_none()
+        && restic_env_value(&entries, "RESTIC_PASSWORD_COMMAND").is_none()
+    {
+        errors.push(restic_missing_setting_message(
+            "RESTIC_PASSWORD, RESTIC_PASSWORD_FILE, or RESTIC_PASSWORD_COMMAND",
+            backup.restic_env_file.as_ref(),
+        ));
+    }
+}
+
+fn restic_missing_setting_message(setting: &str, env_file: Option<&PathBuf>) -> String {
+    if let Some(env_file) = env_file {
+        format!(
+            "backup.resticEnvFile '{}' must define {setting}",
+            env_file.display()
+        )
+    } else {
+        format!(
+            "backup.resticEnvFile is not configured and environment must define {setting} when any server has backup = true"
+        )
+    }
+}
+
+fn load_restic_env_file(path: &Path) -> Result<Vec<(String, String)>> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read restic env file '{}'", path.display()))?;
+
+    text.lines()
+        .enumerate()
+        .filter_map(|(index, line)| parse_restic_env_line(path, index + 1, line).transpose())
+        .collect()
+}
+
+fn parse_restic_env_line(
+    path: &Path,
+    line_number: usize,
+    line: &str,
+) -> Result<Option<(String, String)>> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return Ok(None);
+    }
+
+    let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+    let (key, value) = line.split_once('=').ok_or_else(|| {
+        anyhow!(
+            "Invalid env file line {} in '{}': expected KEY=value",
+            line_number,
+            path.display()
+        )
+    })?;
+    let key = key.trim();
+
+    if !is_valid_env_key(key) {
+        bail!(
+            "Invalid env variable name '{}' on line {} in '{}'",
+            key,
+            line_number,
+            path.display()
+        );
+    }
+
+    Ok(Some((
+        key.to_string(),
+        parse_restic_env_value(value.trim()),
+    )))
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_restic_env_value(value: &str) -> String {
+    let value = strip_inline_comment(value).trim();
+
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+        {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+
+    value.to_string()
+}
+
+fn strip_inline_comment(value: &str) -> &str {
+    let mut in_single_quotes = false;
+    let mut in_double_quotes = false;
+
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
+            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
+            '#' if !in_single_quotes && !in_double_quotes => return &value[..index],
+            _ => {}
+        }
+    }
+
+    value
+}
+
+fn restic_env_value(entries: &[(String, String)], key: &str) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find_map(|(entry_key, value)| (entry_key == key).then(|| value.clone()))
 }
 
 fn validate_unique_server_names(config: &Config, errors: &mut Vec<String>) {
@@ -778,6 +917,13 @@ mod tests {
         toml_edit::de::from_str(toml).expect("test config should parse")
     }
 
+    fn write_test_restic_env(name: &str, text: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("clserver-{name}-{}-restic.env", std::process::id()));
+        fs::write(&path, text).expect("test restic env file should be written");
+        path
+    }
+
     #[test]
     fn validates_complete_minecraft_config() {
         let config = parse_config(
@@ -803,7 +949,14 @@ mod tests {
 
     #[test]
     fn validates_local_backup_dir_when_backup_is_enabled() {
-        let config = parse_config(
+        let restic_env = write_test_restic_env(
+            "validates-local-backup-dir",
+            r#"
+            RESTIC_REPOSITORY='s3:s3.example.com/bucket'
+            RESTIC_PASSWORD_FILE='/secure/restic.pwd'
+            "#,
+        );
+        let config = parse_config(&format!(
             r#"
         [global]
         serverDir = "/srv/servers"
@@ -811,6 +964,7 @@ mod tests {
 
         [backup]
         localDir = "/srv/backups"
+        resticEnvFile = "{}"
 
         [java_environments]
         default = "/usr/bin/java"
@@ -824,7 +978,8 @@ mod tests {
         backup = true
         enabled = true
         "#,
-        );
+            restic_env.display()
+        ));
 
         validate_config(&config).expect("backup config should be valid");
         assert_eq!(
@@ -869,6 +1024,78 @@ mod tests {
                 "/home/blackshadow/.config/clserver/secrets/restic.env"
             ))
         );
+    }
+
+    #[test]
+    fn rejects_restic_env_file_missing_repository_when_backup_is_enabled() {
+        let restic_env = write_test_restic_env(
+            "missing-repository",
+            r#"
+            RESTIC_PASSWORD_FILE='/secure/restic.pwd'
+            "#,
+        );
+        let config = parse_config(&format!(
+            r#"
+            [global]
+            serverDir = "/srv/servers"
+            logDir = "/var/log/clserver"
+
+            [backup]
+            localDir = "/srv/backups"
+            resticEnvFile = "{}"
+
+            [java_environments]
+            default = "/usr/bin/java"
+
+            [servers.survival]
+            name = "survival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25575
+            rconPassword = "secret"
+            backup = true
+            "#,
+            restic_env.display()
+        ));
+
+        let error = validate_config(&config).expect_err("missing restic repository should fail");
+        assert!(error.to_string().contains("RESTIC_REPOSITORY"));
+    }
+
+    #[test]
+    fn rejects_restic_env_file_missing_password_when_backup_is_enabled() {
+        let restic_env = write_test_restic_env(
+            "missing-password",
+            r#"
+            RESTIC_REPOSITORY='s3:s3.example.com/bucket'
+            "#,
+        );
+        let config = parse_config(&format!(
+            r#"
+            [global]
+            serverDir = "/srv/servers"
+            logDir = "/var/log/clserver"
+
+            [backup]
+            localDir = "/srv/backups"
+            resticEnvFile = "{}"
+
+            [java_environments]
+            default = "/usr/bin/java"
+
+            [servers.survival]
+            name = "survival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25575
+            rconPassword = "secret"
+            backup = true
+            "#,
+            restic_env.display()
+        ));
+
+        let error = validate_config(&config).expect_err("missing restic password should fail");
+        assert!(error.to_string().contains("RESTIC_PASSWORD"));
     }
 
     #[test]

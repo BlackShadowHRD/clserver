@@ -13,6 +13,7 @@ use tracing::{info, warn};
 use generic::GenericServer;
 use manager::{
     DEFAULT_STOP_POLL_INTERVAL, DEFAULT_STOP_TIMEOUT, ServerManager, cleanup_remote_backups,
+    format_system_time, latest_remote_snapshot, restic_environment_status,
 };
 use minecraft::MinecraftServer;
 
@@ -34,6 +35,7 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
             target: BackupTarget::All,
         } => return backup_all_servers(&mut config, BackupKind::Remote),
         Action::BackupCleanup => return cleanup_remote_backups(&config.backup),
+        Action::BackupStatus => return backup_status(&config),
         _ => {}
     }
 
@@ -103,6 +105,7 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
         Action::BackupCleanup
+        | Action::BackupStatus
         | Action::Maintenance
         | Action::List
         | Action::ValidateConfig { .. } => no_server_action_unreachable(),
@@ -133,6 +136,7 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
         Action::BackupCleanup
+        | Action::BackupStatus
         | Action::Maintenance
         | Action::List
         | Action::ValidateConfig { .. } => no_server_action_unreachable(),
@@ -346,6 +350,195 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
 fn log_maintenance_phase(phase: &str) {
     info!(phase, "daily maintenance phase started");
     println!("== {phase} ==");
+}
+
+fn backup_status(config: &Config) -> Result<()> {
+    let restic_status = restic_environment_status(&config.backup);
+    match &restic_status {
+        Ok(()) => println!("Remote backup Restic environment variables valid."),
+        Err(err) => println!("Remote backup Restic environment variables invalid: {err:#}"),
+    }
+
+    let restic_available = restic_status.is_ok();
+    let mut server_ids: Vec<_> = config.servers.keys().cloned().collect();
+    server_ids.sort();
+
+    let mut remote_errors = Vec::new();
+    let rows = server_ids
+        .into_iter()
+        .map(|server_id| {
+            let manager = manager_for_server(config, &server_id)?;
+            let local_status = manager.local_backup_status()?;
+            let local_mirror = if local_status.path.is_none() {
+                "not configured".to_string()
+            } else if local_status.exists {
+                "exists".to_string()
+            } else {
+                "missing".to_string()
+            };
+            let local_updated = local_status
+                .latest_modified
+                .map(format_system_time)
+                .unwrap_or_else(|| "none".to_string());
+
+            let (remote_snapshot, remote_time) = if !restic_available {
+                ("not checked".to_string(), "env invalid".to_string())
+            } else {
+                match latest_remote_snapshot(&config.backup, &server_id) {
+                    Ok(Some(snapshot)) => (
+                        snapshot.short_id.unwrap_or_else(|| "unknown".to_string()),
+                        snapshot.time.unwrap_or_else(|| "unknown".to_string()),
+                    ),
+                    Ok(None) => ("none".to_string(), "none".to_string()),
+                    Err(err) => {
+                        remote_errors.push(format!("{server_id}: {err:#}"));
+                        ("error".to_string(), "see below".to_string())
+                    }
+                }
+            };
+
+            Ok(BackupStatusRow {
+                id: server_id,
+                server: manager.config.name,
+                backup_enabled: yes_no(manager.config.backup.unwrap_or(false)).to_string(),
+                local_mirror,
+                local_updated,
+                remote_snapshot,
+                remote_time,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    print_backup_status_rows(&rows);
+
+    if !remote_errors.is_empty() {
+        println!();
+        println!("Remote snapshot errors:");
+        for error in remote_errors {
+            println!("- {error}");
+        }
+    }
+
+    Ok(())
+}
+
+struct BackupStatusRow {
+    id: String,
+    server: String,
+    backup_enabled: String,
+    local_mirror: String,
+    local_updated: String,
+    remote_snapshot: String,
+    remote_time: String,
+}
+
+fn print_backup_status_rows(rows: &[BackupStatusRow]) {
+    let id_width = list_column_width("ID", rows.iter().map(|row| row.id.as_str()));
+    let server_width = list_column_width("SERVER", rows.iter().map(|row| row.server.as_str()));
+    let backup_width =
+        list_column_width("BACKUP", rows.iter().map(|row| row.backup_enabled.as_str()));
+    let local_width = list_column_width(
+        "LOCAL MIRROR",
+        rows.iter().map(|row| row.local_mirror.as_str()),
+    );
+    let local_updated_width = list_column_width(
+        "LOCAL UPDATED",
+        rows.iter().map(|row| row.local_updated.as_str()),
+    );
+    let remote_snapshot_width = list_column_width(
+        "REMOTE SNAPSHOT",
+        rows.iter().map(|row| row.remote_snapshot.as_str()),
+    );
+
+    println!(
+        "{}",
+        format_backup_status_row(
+            BackupStatusCells {
+                id: "ID",
+                server: "SERVER",
+                backup_enabled: "BACKUP",
+                local_mirror: "LOCAL MIRROR",
+                local_updated: "LOCAL UPDATED",
+                remote_snapshot: "REMOTE SNAPSHOT",
+                remote_time: "REMOTE TIME",
+            },
+            BackupStatusWidths {
+                id: id_width,
+                server: server_width,
+                backup_enabled: backup_width,
+                local_mirror: local_width,
+                local_updated: local_updated_width,
+                remote_snapshot: remote_snapshot_width,
+            }
+        )
+    );
+
+    for row in rows {
+        println!(
+            "{}",
+            format_backup_status_row(
+                BackupStatusCells {
+                    id: &row.id,
+                    server: &row.server,
+                    backup_enabled: &row.backup_enabled,
+                    local_mirror: &row.local_mirror,
+                    local_updated: &row.local_updated,
+                    remote_snapshot: &row.remote_snapshot,
+                    remote_time: &row.remote_time,
+                },
+                BackupStatusWidths {
+                    id: id_width,
+                    server: server_width,
+                    backup_enabled: backup_width,
+                    local_mirror: local_width,
+                    local_updated: local_updated_width,
+                    remote_snapshot: remote_snapshot_width,
+                }
+            )
+        );
+    }
+}
+
+struct BackupStatusCells<'a> {
+    id: &'a str,
+    server: &'a str,
+    backup_enabled: &'a str,
+    local_mirror: &'a str,
+    local_updated: &'a str,
+    remote_snapshot: &'a str,
+    remote_time: &'a str,
+}
+
+struct BackupStatusWidths {
+    id: usize,
+    server: usize,
+    backup_enabled: usize,
+    local_mirror: usize,
+    local_updated: usize,
+    remote_snapshot: usize,
+}
+
+fn format_backup_status_row(cells: BackupStatusCells<'_>, widths: BackupStatusWidths) -> String {
+    format!(
+        "{:<id_width$}  {:<server_width$}  {:<backup_width$}  {:<local_width$}  {:<local_updated_width$}  {:<remote_snapshot_width$}  {}",
+        cells.id,
+        cells.server,
+        cells.backup_enabled,
+        cells.local_mirror,
+        cells.local_updated,
+        cells.remote_snapshot,
+        cells.remote_time,
+        id_width = widths.id,
+        server_width = widths.server,
+        backup_width = widths.backup_enabled,
+        local_width = widths.local_mirror,
+        local_updated_width = widths.local_updated,
+        remote_snapshot_width = widths.remote_snapshot,
+    )
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn backup_all_servers(config: &mut Config, kind: BackupKind) -> Result<()> {
@@ -873,6 +1066,34 @@ mod tests {
     fn list_column_width_uses_longest_value_or_header() {
         assert_eq!(list_column_width("ID", ["CLS4", "proxy"].into_iter()), 5);
         assert_eq!(list_column_width("SERVER", ["one", "two"].into_iter()), 6);
+    }
+
+    #[test]
+    fn formats_backup_status_rows_with_dynamic_widths() {
+        let row = format_backup_status_row(
+            BackupStatusCells {
+                id: "BH2-B",
+                server: "BH2-build",
+                backup_enabled: "yes",
+                local_mirror: "exists",
+                local_updated: "2026-06-11 12:00:00",
+                remote_snapshot: "abc12345",
+                remote_time: "2026-06-11T12:00:00Z",
+            },
+            BackupStatusWidths {
+                id: "BH2-B".len(),
+                server: "BH2-build".len(),
+                backup_enabled: "BACKUP".len(),
+                local_mirror: "LOCAL MIRROR".len(),
+                local_updated: "2026-06-11 12:00:00".len(),
+                remote_snapshot: "REMOTE SNAPSHOT".len(),
+            },
+        );
+
+        assert_eq!(
+            row,
+            "BH2-B  BH2-build  yes     exists        2026-06-11 12:00:00  abc12345         2026-06-11T12:00:00Z"
+        );
     }
 
     #[test]

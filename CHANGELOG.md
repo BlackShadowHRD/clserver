@@ -21,9 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `maintenance` command for daily fleet maintenance with Velocity-first handling and parallel backend stop/backup/start processing.
 - `enabled` server setting for maintenance restart decisions.
 - `[backup].localDir` setting and `rsync`-based local mirror server backups.
-- `backup local`, `backup remote`, and `backup cleanup` subcommands.
+- `backup local`, `backup remote`, `backup status`, and `backup cleanup` subcommands.
 - Restic-based remote backups tagged by clServer, server ID, and server name.
 - Remote backup cleanup using `restic forget --keep-daily 56 --prune`.
+- `backup status` reporting backup-enabled state, local mirror status, latest local mirror timestamp, Restic env validity, and latest remote Restic snapshot per server.
 - Optional `[backup].resticEnvFile` setting so `clserver` can load restic environment variables itself.
 - `validate-config` now checks restic repository/password settings when backups are enabled.
 - `--version` / `-V` CLI flag powered by the Cargo package version.

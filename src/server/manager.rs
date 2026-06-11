@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::Local;
+use chrono::{DateTime, Local};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -9,10 +9,29 @@ use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
 use crate::config::{BackupConfig, GlobalConfig, RestoreMode, ServerConfig, resolve_java_bin};
+use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
 pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(900);
 pub const DEFAULT_STOP_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+pub struct LocalBackupStatus {
+    pub path: Option<PathBuf>,
+    pub exists: bool,
+    pub latest_modified: Option<SystemTime>,
+}
+
+pub struct RemoteSnapshotSummary {
+    pub short_id: Option<String>,
+    pub time: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ResticSnapshot {
+    time: Option<String>,
+    short_id: Option<String>,
+    id: Option<String>,
+}
 
 pub struct ServerManager {
     pub server_id: String,
@@ -297,6 +316,25 @@ impl ServerManager {
         Ok(())
     }
 
+    pub fn local_backup_status(&self) -> Result<LocalBackupStatus> {
+        let path = self
+            .local_backup_dir
+            .as_ref()
+            .map(|backup_root| backup_root.join(&self.config.name));
+        let exists = path.as_ref().is_some_and(|path| path.exists());
+        let latest_modified = if let Some(path) = path.as_ref().filter(|path| path.exists()) {
+            latest_modified_in_tree(path)?
+        } else {
+            None
+        };
+
+        Ok(LocalBackupStatus {
+            path,
+            exists,
+            latest_modified,
+        })
+    }
+
     pub fn backup_server(&self) -> Result<()> {
         let backup_root = self.backup_root()?;
         let destination = backup_root.join(&self.config.name);
@@ -412,6 +450,59 @@ impl ServerManager {
     }
 }
 
+pub fn latest_remote_snapshot(
+    backup: &BackupConfig,
+    server_id: &str,
+) -> Result<Option<RemoteSnapshotSummary>> {
+    validate_restic_environment(backup.restic_env_file.as_deref())?;
+
+    let mut command = Command::new("restic");
+    apply_restic_env(&mut command, backup.restic_env_file.as_deref())?;
+    let output = command
+        .arg("snapshots")
+        .arg("--latest")
+        .arg("1")
+        .arg("--tag")
+        .arg("clserver")
+        .arg("--tag")
+        .arg(format!("server-id:{server_id}"))
+        .arg("--json")
+        .output()
+        .context("Failed to run 'restic snapshots' for backup status")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "Restic snapshot status failed for server '{}'. Return code: {:?}{}",
+            server_id,
+            output.status.code(),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
+    }
+
+    let snapshots: Vec<ResticSnapshot> = serde_json::from_slice(&output.stdout)
+        .context("Failed to parse 'restic snapshots --json' output")?;
+
+    Ok(snapshots.into_iter().next().map(|snapshot| {
+        let short_id = snapshot
+            .short_id
+            .or_else(|| snapshot.id.map(|id| id.chars().take(8).collect()));
+        RemoteSnapshotSummary {
+            short_id,
+            time: snapshot.time,
+        }
+    }))
+}
+
+pub fn format_system_time(time: SystemTime) -> String {
+    let time: DateTime<Local> = time.into();
+    time.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 pub fn cleanup_remote_backups(backup: &BackupConfig) -> Result<()> {
     validate_restic_environment(backup.restic_env_file.as_deref())?;
     info!(keep_daily = 56, "starting remote restic retention cleanup");
@@ -471,6 +562,10 @@ fn validate_restic_environment(env_file: Option<&Path>) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn restic_environment_status(backup: &BackupConfig) -> Result<()> {
+    validate_restic_environment(backup.restic_env_file.as_deref())
 }
 
 fn restic_env_entries(env_file: Option<&Path>) -> Result<Vec<(String, String)>> {
@@ -654,6 +749,37 @@ fn path_status(path: &PathBuf) -> Result<&'static str> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok("missing"),
         Err(err) => Err(err).context("Failed to read path metadata"),
     }
+}
+
+fn latest_modified_in_tree(path: &Path) -> Result<Option<SystemTime>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("Failed to read metadata for '{}'", path.display()));
+        }
+    };
+
+    let mut latest =
+        Some(metadata.modified().with_context(|| {
+            format!("Failed to read modification time for '{}'", path.display())
+        })?);
+
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)
+            .with_context(|| format!("Failed to read directory '{}'", path.display()))?
+        {
+            let entry = entry.context("Failed to read directory entry")?;
+            if let Some(modified) = latest_modified_in_tree(&entry.path())?
+                && latest.is_none_or(|latest_time| modified > latest_time)
+            {
+                latest = Some(modified);
+            }
+        }
+    }
+
+    Ok(latest)
 }
 
 fn latest_file_in_directory(directory: &PathBuf) -> Result<Option<PathBuf>> {

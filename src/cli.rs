@@ -70,6 +70,9 @@ enum BackupCommands {
     /// Create a remote restic backup
     Remote(BackupSelection),
 
+    /// Show local and remote backup status
+    Status,
+
     /// Run backup retention cleanup
     Cleanup,
 }
@@ -92,6 +95,7 @@ pub enum Action {
     BackupLocal { target: BackupTarget },
     BackupRemote { target: BackupTarget },
     BackupCleanup,
+    BackupStatus,
     Restore,
     Restart,
     Maintenance,
@@ -140,6 +144,7 @@ where
         Commands::Backup { command } => match command {
             BackupCommands::Local(selection) => backup_action(ActionKind::Local, selection),
             BackupCommands::Remote(selection) => backup_action(ActionKind::Remote, selection),
+            BackupCommands::Status => (Action::BackupStatus, None),
             BackupCommands::Cleanup => (Action::BackupCleanup, None),
         },
         Commands::Restore { server } => (Action::Restore, Some(server)),
@@ -343,6 +348,15 @@ mod tests {
                 target: BackupTarget::All
             }
         ));
+        assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_backup_status_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "backup", "status"])?;
+
+        assert!(matches!(request.action, Action::BackupStatus));
         assert_eq!(request.server, None);
         Ok(())
     }

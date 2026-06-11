@@ -8,7 +8,7 @@ use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
-use crate::config::{GlobalConfig, RestoreMode, ServerConfig, resolve_java_bin};
+use crate::config::{BackupConfig, GlobalConfig, RestoreMode, ServerConfig, resolve_java_bin};
 use tracing::{debug, error, info, warn};
 
 pub struct ServerManager {
@@ -17,7 +17,8 @@ pub struct ServerManager {
     java_bin: String,
     server_dir: PathBuf,
     log_dir: PathBuf,
-    backup_dir: Option<PathBuf>,
+    local_backup_dir: Option<PathBuf>,
+    restic_env_file: Option<PathBuf>,
 }
 
 impl ServerManager {
@@ -25,12 +26,14 @@ impl ServerManager {
         server_id: String,
         config: ServerConfig,
         global: &GlobalConfig,
+        backup: &BackupConfig,
         java_environments: &HashMap<String, String>,
     ) -> Result<Self> {
         let java_bin = resolve_java_bin(&config, java_environments)?;
         let server_dir = global.server_dir.join(&config.name);
         let log_dir = global.log_dir.clone();
-        let backup_dir = global.backup_dir.clone();
+        let local_backup_dir = backup.local_dir.clone();
+        let restic_env_file = backup.restic_env_file.clone();
 
         Ok(Self {
             server_id,
@@ -38,7 +41,8 @@ impl ServerManager {
             java_bin,
             server_dir,
             log_dir,
-            backup_dir,
+            local_backup_dir,
+            restic_env_file,
         })
     }
 
@@ -291,6 +295,36 @@ impl ServerManager {
         Ok(())
     }
 
+    pub fn remote_backup_server(&self) -> Result<()> {
+        info!(server = %self.config.name, source = %self.server_dir.display(), "starting remote restic backup");
+
+        let mut command = Command::new("restic");
+        apply_restic_env(&mut command, self.restic_env_file.as_deref())?;
+        let status = command
+            .arg("backup")
+            .arg(&self.server_dir)
+            .arg("--tag")
+            .arg("clserver")
+            .arg("--tag")
+            .arg(format!("server-id:{}", self.server_id))
+            .arg("--tag")
+            .arg(format!("server-name:{}", self.config.name))
+            .status()
+            .context("Failed to run 'restic backup' for remote server backup")?;
+
+        if !status.success() {
+            error!(server = %self.config.name, exit_code = ?status.code(), "remote restic backup failed");
+            bail!(
+                "Remote backup failed for server '{}'. Return code: {:?}",
+                self.config.name,
+                status.code()
+            );
+        }
+
+        info!(server = %self.config.name, "remote restic backup completed");
+        Ok(())
+    }
+
     pub fn restore_server(&self) -> Result<()> {
         let mode = self.config.restore.unwrap_or_default();
         let (source, destination) = self.restore_paths(mode)?;
@@ -330,9 +364,9 @@ impl ServerManager {
     }
 
     fn backup_root(&self) -> Result<&Path> {
-        self.backup_dir.as_deref().ok_or_else(|| {
+        self.local_backup_dir.as_deref().ok_or_else(|| {
             anyhow!(
-                "Server '{}' requires global.backupDir for backup/restore operations.",
+                "Server '{}' requires backup.localDir for local backup/restore operations.",
                 self.config.name
             )
         })
@@ -349,6 +383,119 @@ impl ServerManager {
             RestoreMode::All => (backup_server_dir, self.server_dir.clone()),
         })
     }
+}
+
+pub fn cleanup_remote_backups(backup: &BackupConfig) -> Result<()> {
+    info!(keep_daily = 56, "starting remote restic retention cleanup");
+
+    let mut command = Command::new("restic");
+    apply_restic_env(&mut command, backup.restic_env_file.as_deref())?;
+    let status = command
+        .arg("forget")
+        .arg("--keep-daily")
+        .arg("56")
+        .arg("--prune")
+        .status()
+        .context("Failed to run 'restic forget' for remote backup cleanup")?;
+
+    if !status.success() {
+        error!(exit_code = ?status.code(), "remote restic retention cleanup failed");
+        bail!(
+            "Remote backup cleanup failed. Return code: {:?}",
+            status.code()
+        );
+    }
+
+    info!("remote restic retention cleanup completed");
+    Ok(())
+}
+
+fn apply_restic_env(command: &mut Command, env_file: Option<&Path>) -> Result<()> {
+    let Some(env_file) = env_file else {
+        return Ok(());
+    };
+
+    let entries = load_env_file(env_file)?;
+    for (key, value) in entries {
+        command.env(key, value);
+    }
+
+    Ok(())
+}
+
+fn load_env_file(path: &Path) -> Result<Vec<(String, String)>> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read restic env file '{}'", path.display()))?;
+
+    text.lines()
+        .enumerate()
+        .filter_map(|(index, line)| parse_env_line(path, index + 1, line).transpose())
+        .collect()
+}
+
+fn parse_env_line(path: &Path, line_number: usize, line: &str) -> Result<Option<(String, String)>> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return Ok(None);
+    }
+
+    let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+    let (key, value) = line.split_once('=').ok_or_else(|| {
+        anyhow!(
+            "Invalid env file line {} in '{}': expected KEY=value",
+            line_number,
+            path.display()
+        )
+    })?;
+    let key = key.trim();
+
+    if !is_valid_env_key(key) {
+        bail!(
+            "Invalid env variable name '{}' on line {} in '{}'",
+            key,
+            line_number,
+            path.display()
+        );
+    }
+
+    Ok(Some((key.to_string(), parse_env_value(value.trim()))))
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_env_value(value: &str) -> String {
+    let value = strip_inline_comment(value).trim();
+
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+        {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+
+    value.to_string()
+}
+
+fn strip_inline_comment(value: &str) -> &str {
+    let mut in_single_quotes = false;
+    let mut in_double_quotes = false;
+
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
+            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
+            '#' if !in_single_quotes && !in_double_quotes => return &value[..index],
+            _ => {}
+        }
+    }
+
+    value
 }
 
 fn run_rsync(source: &str, destination: &Path, operation: &str, server_name: &str) -> Result<()> {
@@ -559,5 +706,46 @@ mod tests {
     #[test]
     fn capitalizes_operation_name() {
         assert_eq!(capitalize("restore"), "Restore");
+    }
+
+    #[test]
+    fn parses_restic_env_file_lines() -> Result<()> {
+        let path = Path::new("test.env");
+
+        assert_eq!(
+            parse_env_line(path, 1, "AWS_ACCESS_KEY_ID='abc123'")?,
+            Some(("AWS_ACCESS_KEY_ID".to_string(), "abc123".to_string()))
+        );
+        assert_eq!(
+            parse_env_line(path, 2, "export RESTIC_REPOSITORY=\"s3:endpoint/bucket\"")?,
+            Some((
+                "RESTIC_REPOSITORY".to_string(),
+                "s3:endpoint/bucket".to_string()
+            ))
+        );
+        assert_eq!(parse_env_line(path, 3, "# comment")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn strips_unquoted_inline_comments_from_env_values() -> Result<()> {
+        let path = Path::new("test.env");
+
+        assert_eq!(
+            parse_env_line(
+                path,
+                1,
+                "RESTIC_PASSWORD_FILE=/secure/restic.pwd # local path"
+            )?,
+            Some((
+                "RESTIC_PASSWORD_FILE".to_string(),
+                "/secure/restic.pwd".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_env_line(path, 2, "RESTIC_PASSWORD='abc#def'")?,
+            Some(("RESTIC_PASSWORD".to_string(), "abc#def".to_string()))
+        );
+        Ok(())
     }
 }

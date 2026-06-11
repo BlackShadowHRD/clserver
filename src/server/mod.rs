@@ -4,14 +4,15 @@ pub mod minecraft;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::cli::{Action, Request, StopType};
+use crate::cli::{Action, BackupTarget, Request, StopType};
 use crate::config::{self, Config, ServerType};
+use chrono::{Datelike, Local, Weekday};
 use std::thread;
 use std::time::Duration;
 use tracing::{info, warn};
 
 use generic::GenericServer;
-use manager::ServerManager;
+use manager::{ServerManager, cleanup_remote_backups};
 use minecraft::MinecraftServer;
 
 const MAINTENANCE_STOP_TIMEOUT: Duration = Duration::from_secs(900);
@@ -26,8 +27,16 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
         return list_servers(&config);
     }
 
-    if matches!(request.action, Action::Maintenance) {
-        return run_maintenance(&mut config);
+    match &request.action {
+        Action::Maintenance => return run_maintenance(&mut config),
+        Action::BackupLocal {
+            target: BackupTarget::All,
+        } => return backup_all_servers(&mut config, BackupKind::Local),
+        Action::BackupRemote {
+            target: BackupTarget::All,
+        } => return backup_all_servers(&mut config, BackupKind::Remote),
+        Action::BackupCleanup => return cleanup_remote_backups(&config.backup),
+        _ => {}
     }
 
     let server_name = request
@@ -56,6 +65,7 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
                 server_name.to_string(),
                 server_config,
                 &config.global,
+                &config.backup,
                 &config.java_environments,
             )?;
             dispatch_minecraft(&server, request.action)
@@ -65,6 +75,7 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
                 server_name.to_string(),
                 server_config,
                 &config.global,
+                &config.backup,
                 &config.java_environments,
             )?;
             dispatch_generic(&server, request.action)
@@ -75,7 +86,11 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
 fn action_needs_minecraft_rcon(action: &Action) -> bool {
     matches!(
         action,
-        Action::Stop { .. } | Action::Restart | Action::Backup | Action::Restore
+        Action::Stop { .. }
+            | Action::Restart
+            | Action::BackupLocal { .. }
+            | Action::BackupRemote { .. }
+            | Action::Restore
     )
 }
 
@@ -83,14 +98,16 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
     match action {
         Action::Start => server.start_server(),
         Action::Stop { stop_type } => server.stop_server(stop_type),
-        Action::Backup => backup_minecraft_server(server),
+        Action::BackupLocal { .. } => backup_minecraft_server(server, BackupKind::Local),
+        Action::BackupRemote { .. } => backup_minecraft_server(server, BackupKind::Remote),
         Action::Restore => restore_minecraft_server(server),
         Action::Restart => server.restart_server(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
-        Action::Maintenance | Action::List | Action::ValidateConfig { .. } => {
-            no_server_action_unreachable()
-        }
+        Action::BackupCleanup
+        | Action::Maintenance
+        | Action::List
+        | Action::ValidateConfig { .. } => no_server_action_unreachable(),
     }
 }
 
@@ -111,18 +128,26 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
                 server.manager.stop_with_stop_command()
             }
         }
-        Action::Backup => backup_generic_server(&server.manager),
+        Action::BackupLocal { .. } => backup_generic_server(&server.manager, BackupKind::Local),
+        Action::BackupRemote { .. } => backup_generic_server(&server.manager, BackupKind::Remote),
         Action::Restore => restore_generic_server(&server.manager),
         Action::Restart => server.manager.restart_with_stop_command(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
-        Action::Maintenance | Action::List | Action::ValidateConfig { .. } => {
-            no_server_action_unreachable()
-        }
+        Action::BackupCleanup
+        | Action::Maintenance
+        | Action::List
+        | Action::ValidateConfig { .. } => no_server_action_unreachable(),
     }
 }
 
-fn backup_minecraft_server(server: &MinecraftServer) -> Result<()> {
+#[derive(Clone, Copy)]
+enum BackupKind {
+    Local,
+    Remote,
+}
+
+fn backup_minecraft_server(server: &MinecraftServer, kind: BackupKind) -> Result<()> {
     let was_running = server.manager.screen_session_exists()?;
 
     if was_running {
@@ -130,7 +155,7 @@ fn backup_minecraft_server(server: &MinecraftServer) -> Result<()> {
         ensure_manager_stopped(&server.manager)?;
     }
 
-    let backup_result = server.manager.backup_server();
+    let backup_result = run_manager_backup(&server.manager, kind);
 
     if was_running && let Err(start_err) = server.start_server() {
         return match backup_result {
@@ -144,7 +169,7 @@ fn backup_minecraft_server(server: &MinecraftServer) -> Result<()> {
     backup_result
 }
 
-fn backup_generic_server(manager: &ServerManager) -> Result<()> {
+fn backup_generic_server(manager: &ServerManager, kind: BackupKind) -> Result<()> {
     let was_running = manager.screen_session_exists()?;
 
     if was_running {
@@ -152,7 +177,7 @@ fn backup_generic_server(manager: &ServerManager) -> Result<()> {
         ensure_manager_stopped(manager)?;
     }
 
-    let backup_result = manager.backup_server();
+    let backup_result = run_manager_backup(manager, kind);
 
     if was_running && let Err(start_err) = manager.start_server() {
         return match backup_result {
@@ -164,6 +189,13 @@ fn backup_generic_server(manager: &ServerManager) -> Result<()> {
     }
 
     backup_result
+}
+
+fn run_manager_backup(manager: &ServerManager, kind: BackupKind) -> Result<()> {
+    match kind {
+        BackupKind::Local => manager.backup_server(),
+        BackupKind::Remote => manager.remote_backup_server(),
+    }
 }
 
 fn restore_minecraft_server(server: &MinecraftServer) -> Result<()> {
@@ -217,6 +249,10 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
     reconcile_running_minecraft_servers(config)?;
     handle_velocity_servers(config)?;
 
+    let should_run_cleanup = config
+        .servers
+        .values()
+        .any(|server| server.backup.unwrap_or(false));
     let tasks = build_maintenance_tasks(config)?;
     let task_count = tasks.len();
     info!(task_count, "starting parallel server maintenance tasks");
@@ -244,6 +280,11 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
     }
 
     if failures.is_empty() {
+        if is_monday() && should_run_cleanup {
+            cleanup_remote_backups(&config.backup)
+                .context("Daily maintenance backups completed, but remote cleanup failed")?;
+        }
+
         info!(task_count, "daily maintenance finished successfully");
         println!("Daily maintenance finished");
         Ok(())
@@ -253,6 +294,89 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
         }
         bail!("Daily maintenance failed:\n- {}", failures.join("\n- "));
     }
+}
+
+fn backup_all_servers(config: &mut Config, kind: BackupKind) -> Result<()> {
+    reconcile_running_minecraft_servers(config)?;
+
+    let mut server_ids: Vec<_> = config
+        .servers
+        .iter()
+        .filter(|(_, server)| server.backup.unwrap_or(false))
+        .map(|(server_id, _)| server_id.clone())
+        .collect();
+    server_ids.sort();
+
+    let tasks = server_ids
+        .into_iter()
+        .map(|server_id| {
+            let server = maintenance_server_for_config(config, &server_id)?;
+            Ok(BackupTask { server, kind })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    run_backup_tasks(tasks)
+}
+
+fn run_backup_tasks(tasks: Vec<BackupTask>) -> Result<()> {
+    let handles: Vec<_> = tasks
+        .into_iter()
+        .map(|task| {
+            thread::spawn(move || {
+                let server_id = task.server.server_id().to_string();
+                let result = process_backup_task(task);
+                (server_id, result)
+            })
+        })
+        .collect();
+
+    let mut failures = Vec::new();
+    for handle in handles {
+        let (server_id, result) = handle
+            .join()
+            .map_err(|_| anyhow!("backup worker thread panicked"))?;
+
+        if let Err(err) = result {
+            failures.push(format!("{server_id}: {err:#}"));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("Backup failed:\n- {}", failures.join("\n- "));
+    }
+}
+
+struct BackupTask {
+    server: MaintenanceServer,
+    kind: BackupKind,
+}
+
+fn process_backup_task(task: BackupTask) -> Result<()> {
+    let was_running = task.server.screen_session_exists()?;
+
+    if was_running {
+        task.server.stop_for_maintenance()?;
+        ensure_stopped(&task.server)?;
+    }
+
+    let backup_result = task.server.backup_server(task.kind);
+
+    if was_running && let Err(start_err) = task.server.start_server() {
+        return match backup_result {
+            Ok(()) => Err(start_err).context("Backup completed, but failed to restart server"),
+            Err(backup_err) => Err(backup_err).context(format!(
+                "Backup failed, and server restart also failed: {start_err:#}"
+            )),
+        };
+    }
+
+    backup_result
+}
+
+fn is_monday() -> bool {
+    Local::now().weekday() == Weekday::Mon
 }
 
 fn reconcile_running_minecraft_servers(config: &mut Config) -> Result<()> {
@@ -289,15 +413,31 @@ fn handle_velocity_servers(config: &Config) -> Result<()> {
             println!("Stopping Velocity server {}", manager.server_id);
             manager.stop_with_stop_command()?;
             ensure_manager_stopped(&manager)?;
-
-            info!(server = %manager.config.name, id = %manager.server_id, "restarting velocity server before backend maintenance");
-            println!("Starting Velocity server {}", manager.server_id);
-            manager.start_server()?;
-        } else if should_start {
-            info!(server = %manager.config.name, id = %manager.server_id, "starting enabled velocity server before backend maintenance");
-            println!("Starting Velocity server {}", manager.server_id);
-            manager.start_server()?;
         }
+
+        let backup_result = if server_config.backup.unwrap_or(false) {
+            manager
+                .backup_server()
+                .and_then(|()| manager.remote_backup_server())
+        } else {
+            Ok(())
+        };
+
+        if was_running || should_start {
+            info!(server = %manager.config.name, id = %manager.server_id, "starting velocity server before backend maintenance");
+            println!("Starting Velocity server {}", manager.server_id);
+            if let Err(start_err) = manager.start_server() {
+                return match backup_result {
+                    Ok(()) => Err(start_err)
+                        .context("Velocity backup completed, but failed to restart server"),
+                    Err(backup_err) => Err(backup_err).context(format!(
+                        "Velocity backup failed, and server restart also failed: {start_err:#}"
+                    )),
+                };
+            }
+        }
+
+        backup_result?;
     }
 
     Ok(())
@@ -408,10 +548,12 @@ impl MaintenanceServer {
         }
     }
 
-    fn backup_server(&self) -> Result<()> {
-        match self {
-            Self::Minecraft(server) => server.manager.backup_server(),
-            Self::Generic(manager) => manager.backup_server(),
+    fn backup_server(&self, kind: BackupKind) -> Result<()> {
+        match (self, kind) {
+            (Self::Minecraft(server), BackupKind::Local) => server.manager.backup_server(),
+            (Self::Minecraft(server), BackupKind::Remote) => server.manager.remote_backup_server(),
+            (Self::Generic(manager), BackupKind::Local) => manager.backup_server(),
+            (Self::Generic(manager), BackupKind::Remote) => manager.remote_backup_server(),
         }
     }
 
@@ -435,6 +577,7 @@ fn maintenance_server_for_config(config: &Config, server_id: &str) -> Result<Mai
             server_id.to_string(),
             server_config,
             &config.global,
+            &config.backup,
             &config.java_environments,
         )?)),
         ServerType::Velocity | ServerType::Hytale => {
@@ -442,6 +585,7 @@ fn maintenance_server_for_config(config: &Config, server_id: &str) -> Result<Mai
                 server_id.to_string(),
                 server_config,
                 &config.global,
+                &config.backup,
                 &config.java_environments,
             )?))
         }
@@ -460,7 +604,8 @@ fn process_maintenance_task(task: MaintenanceTask) -> Result<()> {
     }
 
     if task.should_backup {
-        task.server.backup_server()?;
+        task.server.backup_server(BackupKind::Local)?;
+        task.server.backup_server(BackupKind::Remote)?;
     }
 
     if task.should_start {
@@ -504,6 +649,7 @@ fn manager_for_server(config: &Config, server_id: &str) -> Result<ServerManager>
         server_id.to_string(),
         server_config,
         &config.global,
+        &config.backup,
         &config.java_environments,
     )
     .with_context(|| format!("Failed to initialize server manager for '{server_id}'"))
@@ -520,6 +666,7 @@ fn list_servers(config: &Config) -> Result<()> {
                 server_id.clone(),
                 server_config.clone(),
                 &config.global,
+                &config.backup,
                 &config.java_environments,
             )?;
             let status = if manager.screen_session_exists()? {

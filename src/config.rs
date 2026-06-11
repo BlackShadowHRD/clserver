@@ -34,6 +34,10 @@ pub struct Config {
     /// the real server directory and `screen` session name.
     #[serde(default)]
     pub servers: HashMap<String, ServerConfig>,
+
+    /// Backup tool settings.
+    #[serde(default)]
+    pub backup: BackupConfig,
 }
 
 /// Global filesystem settings shared by every server.
@@ -49,10 +53,18 @@ pub struct GlobalConfig {
     /// Base directory for per-server `screen` logs.
     #[serde(rename = "logDir")]
     pub log_dir: PathBuf,
+}
 
-    /// Base directory where server backups are written.
-    #[serde(rename = "backupDir")]
-    pub backup_dir: Option<PathBuf>,
+/// Backup tool settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BackupConfig {
+    /// Base directory for local mirror backups.
+    #[serde(rename = "localDir")]
+    pub local_dir: Option<PathBuf>,
+
+    /// Shell-style env file loaded for restic commands.
+    #[serde(rename = "resticEnvFile")]
+    pub restic_env_file: Option<PathBuf>,
 }
 
 /// Supported server runtime categories.
@@ -213,12 +225,21 @@ pub fn validate_config(config: &Config) -> Result<()> {
     }
 
     if config
-        .global
-        .backup_dir
+        .backup
+        .local_dir
         .as_ref()
         .is_some_and(|path| is_blank_path(path))
     {
-        errors.push("global.backupDir cannot be empty when configured".to_string());
+        errors.push("backup.localDir cannot be empty when configured".to_string());
+    }
+
+    if config
+        .backup
+        .restic_env_file
+        .as_ref()
+        .is_some_and(|path| is_blank_path(path))
+    {
+        errors.push("backup.resticEnvFile cannot be empty when configured".to_string());
     }
 
     if config.servers.is_empty() {
@@ -248,12 +269,12 @@ pub fn validate_config(config: &Config) -> Result<()> {
         .values()
         .any(|server| server.backup.unwrap_or(false))
         && config
-            .global
-            .backup_dir
+            .backup
+            .local_dir
             .as_ref()
             .is_none_or(|path| is_blank_path(path))
     {
-        errors.push("global.backupDir is required when any server has backup = true".to_string());
+        errors.push("backup.localDir is required when any server has backup = true".to_string());
     }
 
     if errors.is_empty() {
@@ -781,13 +802,15 @@ mod tests {
     }
 
     #[test]
-    fn validates_backup_dir_when_backup_is_enabled() {
+    fn validates_local_backup_dir_when_backup_is_enabled() {
         let config = parse_config(
             r#"
         [global]
         serverDir = "/srv/servers"
         logDir = "/var/log/clserver"
-        backupDir = "/srv/backups"
+
+        [backup]
+        localDir = "/srv/backups"
 
         [java_environments]
         default = "/usr/bin/java"
@@ -805,10 +828,47 @@ mod tests {
 
         validate_config(&config).expect("backup config should be valid");
         assert_eq!(
-            config.global.backup_dir.as_deref(),
+            config.backup.local_dir.as_deref(),
             Some(Path::new("/srv/backups"))
         );
         assert_eq!(config.servers["survival"].enabled, Some(true));
+    }
+
+    #[test]
+    fn parses_backup_config() {
+        let config = parse_config(
+            r#"
+            [global]
+            serverDir = "/srv/servers"
+            logDir = "/var/log/clserver"
+
+            [backup]
+            localDir = "/srv/backups"
+            resticEnvFile = "/home/blackshadow/.config/clserver/secrets/restic.env"
+
+            [java_environments]
+            default = "/usr/bin/java"
+
+            [servers.survival]
+            name = "survival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25575
+            rconPassword = "secret"
+            "#,
+        );
+
+        validate_config(&config).expect("backup config should be valid");
+        assert_eq!(
+            config.backup.local_dir.as_deref(),
+            Some(Path::new("/srv/backups"))
+        );
+        assert_eq!(
+            config.backup.restic_env_file.as_deref(),
+            Some(Path::new(
+                "/home/blackshadow/.config/clserver/secrets/restic.env"
+            ))
+        );
     }
 
     #[test]
@@ -848,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_backup_dir_when_backup_is_enabled() {
+    fn rejects_missing_local_backup_dir_when_backup_is_enabled() {
         let config = parse_config(
             r#"
         [global]
@@ -868,8 +928,8 @@ mod tests {
         "#,
         );
 
-        let error = validate_config(&config).expect_err("missing backupDir should be invalid");
-        assert!(error.to_string().contains("global.backupDir is required"));
+        let error = validate_config(&config).expect_err("missing localDir should be invalid");
+        assert!(error.to_string().contains("backup.localDir is required"));
     }
 
     #[test]

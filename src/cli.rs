@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -30,8 +30,11 @@ enum Commands {
         stop_type: StopType,
     },
 
-    /// Backup the named server
-    Backup { server: String },
+    /// Run local mirror, remote restic, or cleanup backup operations
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommands,
+    },
 
     /// Restore the named server from its configured backup
     Restore { server: String },
@@ -59,11 +62,36 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum BackupCommands {
+    /// Create a local mirror backup
+    Local(BackupSelection),
+
+    /// Create a remote restic backup
+    Remote(BackupSelection),
+
+    /// Run backup retention cleanup
+    Cleanup,
+}
+
+#[derive(Args, Debug)]
+struct BackupSelection {
+    /// Server ID to back up
+    #[arg(required_unless_present = "all", conflicts_with = "all")]
+    server: Option<String>,
+
+    /// Back up all servers with backup = true
+    #[arg(long)]
+    all: bool,
+}
+
 #[derive(Debug)]
 pub enum Action {
     Start,
     Stop { stop_type: StopType },
-    Backup,
+    BackupLocal { target: BackupTarget },
+    BackupRemote { target: BackupTarget },
+    BackupCleanup,
     Restore,
     Restart,
     Maintenance,
@@ -71,6 +99,12 @@ pub enum Action {
     Status,
     List,
     ValidateConfig { fix: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupTarget {
+    Named(String),
+    All,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -103,7 +137,11 @@ where
     let (action, server) = match cli.command {
         Commands::Start { server } => (Action::Start, Some(server)),
         Commands::Stop { server, stop_type } => (Action::Stop { stop_type }, Some(server)),
-        Commands::Backup { server } => (Action::Backup, Some(server)),
+        Commands::Backup { command } => match command {
+            BackupCommands::Local(selection) => backup_action(ActionKind::Local, selection),
+            BackupCommands::Remote(selection) => backup_action(ActionKind::Remote, selection),
+            BackupCommands::Cleanup => (Action::BackupCleanup, None),
+        },
         Commands::Restore { server } => (Action::Restore, Some(server)),
         Commands::Restart { server } => (Action::Restart, Some(server)),
         Commands::Maintenance => (Action::Maintenance, None),
@@ -120,6 +158,35 @@ where
     };
 
     Ok(request)
+}
+
+enum ActionKind {
+    Local,
+    Remote,
+}
+
+fn backup_action(kind: ActionKind, selection: BackupSelection) -> (Action, Option<String>) {
+    let target = if selection.all {
+        BackupTarget::All
+    } else {
+        BackupTarget::Named(
+            selection
+                .server
+                .expect("clap requires server unless --all is present"),
+        )
+    };
+
+    let server = match &target {
+        BackupTarget::Named(server) => Some(server.clone()),
+        BackupTarget::All => None,
+    };
+
+    let action = match kind {
+        ActionKind::Local => Action::BackupLocal { target },
+        ActionKind::Remote => Action::BackupRemote { target },
+    };
+
+    (action, server)
 }
 
 #[cfg(test)]
@@ -250,6 +317,51 @@ mod tests {
         assert!(matches!(request.action, Action::Restore));
         assert_eq!(request.server.as_deref(), Some("survival"));
         Ok(())
+    }
+
+    #[test]
+    fn parses_backup_local_named_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "backup", "local", "survival"])?;
+
+        assert!(matches!(
+            request.action,
+            Action::BackupLocal {
+                target: BackupTarget::Named(ref server)
+            } if server == "survival"
+        ));
+        assert_eq!(request.server.as_deref(), Some("survival"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_backup_remote_all_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "backup", "remote", "--all"])?;
+
+        assert!(matches!(
+            request.action,
+            Action::BackupRemote {
+                target: BackupTarget::All
+            }
+        ));
+        assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_backup_cleanup_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "backup", "cleanup"])?;
+
+        assert!(matches!(request.action, Action::BackupCleanup));
+        assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_backup_local_without_server_or_all() {
+        let error = parse_request_from(["clserver", "backup", "local"])
+            .expect_err("backup local requires server or --all");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

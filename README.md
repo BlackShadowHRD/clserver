@@ -19,7 +19,8 @@
 - `bash`, used when launching generated start commands
 - Java runtime(s) for the servers you want to run
 - Minecraft RCON enabled for Minecraft stop/restart support
-- `rsync`, for backup and maintenance workflows that copy server files
+- `rsync`, for local mirror backups and local restores
+- `restic`, for remote historical backups
 
 ## Building
 
@@ -49,7 +50,7 @@ On the server that will run `clServer`, install the required runtime tools:
 
 ```sh
 sudo apt update
-sudo apt install screen bash rsync
+sudo apt install screen bash rsync restic
 ```
 
 Install the Java runtime versions required by your configured servers. For example:
@@ -228,7 +229,10 @@ Then create:
 [global]
 serverDir = "/srv/servers"
 logDir = "/var/log/clserver"
-backupDir = "/srv/backups/clserver"
+
+[backup]
+localDir = "/srv/backups/clserver"
+resticEnvFile = "/home/blackshadow/.config/clserver/secrets/restic.env"
 
 [java_environments]
 default = "/usr/bin/java"
@@ -266,7 +270,21 @@ backup = false
 | --- | --- | --- |
 | `serverDir` | Yes | Base directory containing all server directories. Each server is expected at `<serverDir>/<server name>`. |
 | `logDir` | Yes | Base directory for per-server screen logs. |
-| `backupDir` | Required when any server has `backup = true` | Base directory for `rsync` backups. Each server is backed up to `<backupDir>/<server name>`. |
+
+### `[backup]`
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `localDir` | Required when any server has `backup = true` | Base directory for local mirror backups. Each server is backed up to `<localDir>/<server name>`. |
+| `resticEnvFile` | No | Path to a shell-style env file loaded for `restic` commands. If omitted, `restic` inherits the environment from the `clserver` process. |
+
+Example:
+
+```toml
+[backup]
+localDir = "/srv/backups/clserver"
+resticEnvFile = "/home/blackshadow/.config/clserver/secrets/restic.env"
+```
 
 ### `[java_environments]`
 
@@ -314,7 +332,7 @@ The `name` field is the real server directory and `screen` session name. Server 
 | `rconPort` | Required for Minecraft | RCON port for Minecraft servers. |
 | `rconPassword` | Required for Minecraft | RCON password for Minecraft servers. |
 | `enabled` | No | Whether whole-fleet maintenance should start this server. Missing values are treated as `false` for maintenance. |
-| `backup` | No | Whether `backup` and `maintenance` should copy this server with `rsync`. Requires `global.backupDir` when true. |
+| `backup` | No | Whether `backup --all` and `maintenance` should back up this server. Requires `backup.localDir` when true. |
 | `restore` | No | Restore scope for `clserver restore <id>`. Supported values are `"world"` and `"all"`. Defaults to `"world"`. |
 
 ## CLI usage
@@ -412,13 +430,34 @@ clserver status survival
 
 Status output includes the server ID, real server name, configured server type, whether the `screen` session is running, server/log paths, latest screen log, Java executable, start mode, and whether stop/RCON/backup settings are configured.
 
-Run a backup:
+Run a local mirror backup for one server:
 
 ```sh
-clserver backup survival
+clserver backup local survival
 ```
 
-If the target server is running, `backup` stops it, waits for the `screen` session to exit, runs the backup, and then starts it again. Minecraft servers use friendly shutdown for this flow; other server types use their configured `stopCommand`. If the server was already stopped, it is backed up without being started afterward.
+Run a remote restic backup for one server:
+
+```sh
+clserver backup remote survival
+```
+
+Run local or remote backups for all servers with `backup = true`:
+
+```sh
+clserver backup local --all
+clserver backup remote --all
+```
+
+Run remote restic retention cleanup immediately:
+
+```sh
+clserver backup cleanup
+```
+
+Named interactive backups ignore the server's `backup` setting, so `clserver backup local survival` and `clserver backup remote survival` force that specific backup. `--all` only processes servers with `backup = true`.
+
+If the target server is running, backup stops it, waits for the `screen` session to exit, runs the backup, and then starts it again. Minecraft servers use friendly shutdown for this flow; other server types use their configured `stopCommand`. If the server was already stopped, it is backed up without being started afterward.
 
 Restore a server from its local backup:
 
@@ -452,14 +491,15 @@ Maintenance performs this workflow:
    - use `friendly` shutdown for Minecraft; if no players are online, this becomes immediate
    - use the configured `stopCommand` immediately for other server types
    - wait for the `screen` session to exit
-   - run `rsync -av --delete` for servers with `backup = true`
+   - run local mirror and remote restic backups for servers with `backup = true`
    - start servers with `enabled = true`
+4. On Mondays, if backup-enabled servers were processed successfully, run remote restic cleanup with `--keep-daily 56 --prune`.
 
 ## How backups work
 
-Backups and restores use `rsync --delete`, so the destination is made to match the source. For restore operations, that means destination files that do not exist in the backup can be deleted.
+Local backups and restores use `rsync --delete`, so the destination is made to match the source. For restore operations, that means destination files that do not exist in the backup can be deleted.
 
-Backups use `rsync` and copy:
+Local backups use `rsync` and copy:
 
 ```text
 <global.serverDir>/<server name>/
@@ -468,15 +508,32 @@ Backups use `rsync` and copy:
 to:
 
 ```text
-<global.backupDir>/<server name>
+<backup.localDir>/<server name>
 ```
 
 The trailing slash on the source is intentional: it backs up the contents of the server directory into the per-server backup directory. `--delete` removes files from the backup that no longer exist in the source.
 
+Remote backups use `restic`. If `[backup].resticEnvFile` is configured, `clserver` reads that file and passes its variables to `restic`; otherwise `restic` inherits the environment from the shell or cron job. A typical protected env file should provide values such as:
+
+```sh
+AWS_ACCESS_KEY_ID='...'
+AWS_SECRET_ACCESS_KEY='...'
+RESTIC_REPOSITORY='s3:s3.eu-west-3.idrivee2.com/clserver'
+RESTIC_PASSWORD_FILE='/home/blackshadow/.config/clserver/secrets/restic.pwd'
+```
+
+`clserver backup remote` runs restic with tags for `clserver`, `server-id:<id>`, and `server-name:<name>`. Remote cleanup uses:
+
+```sh
+restic forget --keep-daily 56 --prune
+```
+
+This keeps daily restore points for roughly eight weeks.
+
 Restore mode `"world"` copies:
 
 ```text
-<global.backupDir>/<server name>/world/
+<backup.localDir>/<server name>/world/
 ```
 
 to:
@@ -488,7 +545,7 @@ to:
 Restore mode `"all"` copies:
 
 ```text
-<global.backupDir>/<server name>/
+<backup.localDir>/<server name>/
 ```
 
 to:

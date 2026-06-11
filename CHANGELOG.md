@@ -20,7 +20,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Unit tests for configuration validation, `server.properties` RCON password parsing, and CLI subcommand parsing.
 - `maintenance` command for daily fleet maintenance with Velocity-first handling and parallel backend stop/backup/start processing.
 - `enabled` server setting for maintenance restart decisions.
-- `global.backupDir` setting and `rsync`-based server backups.
+- `[backup].localDir` setting and `rsync`-based local mirror server backups.
+- `backup local`, `backup remote`, and `backup cleanup` subcommands.
+- Restic-based remote backups tagged by clServer, server ID, and server name.
+- Remote backup cleanup using `restic forget --keep-daily 56 --prune`.
+- Optional `[backup].resticEnvFile` setting so `clserver` can load restic environment variables itself.
 - `--version` / `-V` CLI flag powered by the Cargo package version.
 - `restore <server>` command for restoring either the `world` directory or the full server backup with confirmation.
 - Per-server `restore` setting with supported values `"world"` and `"all"`, defaulting to `"world"`.
@@ -45,8 +49,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `$XDG_STATE_HOME/clserver/clserver.log`
 - Server table keys now act as command IDs/shortcuts, while `name` is the real server directory and `screen` session name.
 - Server `name` values are now validated as unique; duplicate TOML table IDs are rejected by TOML parsing.
-- `backup` now runs `rsync -av --delete` instead of being a placeholder.
-- `backup <server>` now stops a running server before backup and restarts it afterward.
+- `backup local <server>` now runs `rsync -av --delete` instead of the old placeholder backup.
+- `backup local <server>` and `backup remote <server>` stop a running server before backup and restart it afterward.
+- Daily maintenance now runs both local mirror and remote restic backups for servers with `backup = true`.
 
 ### Fixed
 

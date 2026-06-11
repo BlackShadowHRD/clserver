@@ -4,7 +4,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use crate::cli::StopType;
-use crate::config::{GlobalConfig, ServerConfig};
+use crate::config::{BackupConfig, GlobalConfig, ServerConfig};
 use crate::rcon::RconClient;
 use tracing::{info, warn};
 
@@ -21,6 +21,7 @@ impl MinecraftServer {
         server_id: String,
         config: ServerConfig,
         global: &GlobalConfig,
+        backup: &BackupConfig,
         java_environments: &HashMap<String, String>,
     ) -> Result<Self> {
         let rcon_port = config
@@ -30,7 +31,7 @@ impl MinecraftServer {
             .rcon_password
             .clone()
             .ok_or_else(|| anyhow!("Minecraft server '{}' has no rconPassword.", config.name))?;
-        let manager = ServerManager::new(server_id, config, global, java_environments)?;
+        let manager = ServerManager::new(server_id, config, global, backup, java_environments)?;
 
         Ok(Self {
             manager,

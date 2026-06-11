@@ -264,10 +264,7 @@ pub fn validate_config(config: &Config) -> Result<()> {
         validate_server_config(server_key, server, config, &mut errors);
     }
 
-    let any_backup_enabled = config
-        .servers
-        .values()
-        .any(|server| server.backup.unwrap_or(false));
+    let any_backup_enabled = has_backup_enabled_servers(config);
 
     if any_backup_enabled
         && config
@@ -288,6 +285,26 @@ pub fn validate_config(config: &Config) -> Result<()> {
     } else {
         bail!("Invalid configuration:\n- {}", errors.join("\n- "))
     }
+}
+
+pub fn restic_environment_check_success_message(config: &Config) -> Option<String> {
+    has_backup_enabled_servers(config).then(|| {
+        if let Some(env_file) = config.backup.restic_env_file.as_ref() {
+            format!(
+                "Remote backup Restic environment check valid using '{}'.",
+                env_file.display()
+            )
+        } else {
+            "Remote backup Restic environment check valid using process environment.".to_string()
+        }
+    })
+}
+
+fn has_backup_enabled_servers(config: &Config) -> bool {
+    config
+        .servers
+        .values()
+        .any(|server| server.backup.unwrap_or(false))
 }
 
 fn validate_restic_environment_config(backup: &BackupConfig, errors: &mut Vec<String>) {
@@ -699,7 +716,7 @@ pub fn validate_or_fix_minecraft_rcon_passwords(config: &Config, fix: bool) -> R
     let mismatches = find_minecraft_rcon_password_mismatches(config)?;
 
     if mismatches.is_empty() {
-        println!("Configuration is valid.");
+        print_validate_config_success(config);
         return Ok(());
     }
 
@@ -719,7 +736,18 @@ pub fn validate_or_fix_minecraft_rcon_passwords(config: &Config, fix: bool) -> R
         bail!("RCON password mismatches found");
     }
 
-    fix_minecraft_rcon_passwords(&mismatches)
+    fix_minecraft_rcon_passwords(&mismatches)?;
+    if let Some(message) = restic_environment_check_success_message(config) {
+        println!("{message}");
+    }
+    Ok(())
+}
+
+fn print_validate_config_success(config: &Config) {
+    if let Some(message) = restic_environment_check_success_message(config) {
+        println!("{message}");
+    }
+    println!("Configuration is valid.");
 }
 
 fn find_minecraft_rcon_password_mismatches(config: &Config) -> Result<Vec<RconPasswordMismatch>> {
@@ -987,6 +1015,72 @@ mod tests {
             Some(Path::new("/srv/backups"))
         );
         assert_eq!(config.servers["survival"].enabled, Some(true));
+    }
+
+    #[test]
+    fn reports_restic_environment_check_success_when_backup_is_enabled() {
+        let restic_env = write_test_restic_env(
+            "success-message",
+            r#"
+            RESTIC_REPOSITORY='s3:s3.example.com/bucket'
+            RESTIC_PASSWORD_FILE='/secure/restic.pwd'
+            "#,
+        );
+        let config = parse_config(&format!(
+            r#"
+            [global]
+            serverDir = "/srv/servers"
+            logDir = "/var/log/clserver"
+
+            [backup]
+            localDir = "/srv/backups"
+            resticEnvFile = "{}"
+
+            [java_environments]
+            default = "/usr/bin/java"
+
+            [servers.survival]
+            name = "survival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25575
+            rconPassword = "secret"
+            backup = true
+            "#,
+            restic_env.display()
+        ));
+
+        validate_config(&config).expect("backup config should be valid");
+
+        let message = restic_environment_check_success_message(&config)
+            .expect("backup-enabled config should report restic check success");
+        assert!(message.contains("Remote backup Restic environment check valid"));
+        assert!(message.contains(&restic_env.display().to_string()));
+    }
+
+    #[test]
+    fn skips_restic_environment_check_success_when_no_backup_is_enabled() {
+        let config = parse_config(
+            r#"
+            [global]
+            serverDir = "/srv/servers"
+            logDir = "/var/log/clserver"
+
+            [java_environments]
+            default = "/usr/bin/java"
+
+            [servers.survival]
+            name = "survival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25575
+            rconPassword = "secret"
+            "#,
+        );
+
+        validate_config(&config).expect("config should be valid");
+
+        assert!(restic_environment_check_success_message(&config).is_none());
     }
 
     #[test]

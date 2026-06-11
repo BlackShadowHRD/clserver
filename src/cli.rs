@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use clap_complete::{Shell, generate};
 use std::path::PathBuf;
 
@@ -42,14 +42,8 @@ enum Commands {
         command: BackupCommands,
     },
 
-    /// Restore the named server from its configured backup
-    Restore {
-        server: String,
-
-        /// Preview restore changes without copying or deleting files
-        #[arg(long)]
-        dry_run: bool,
-    },
+    /// Restore the named server from local or remote backup
+    Restore(RestoreArgs),
 
     /// Restart the named server
     Restart { server: String },
@@ -101,6 +95,49 @@ enum BackupCommands {
 }
 
 #[derive(Args, Debug)]
+struct RestoreArgs {
+    /// Server ID to restore from the local mirror backup
+    server: Option<String>,
+
+    /// Preview restore changes without copying or deleting files
+    #[arg(long)]
+    dry_run: bool,
+
+    #[command(subcommand)]
+    command: Option<RestoreCommands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum RestoreCommands {
+    /// Restore from a remote restic snapshot
+    Remote(RemoteRestoreArgs),
+}
+
+#[derive(Args, Debug)]
+struct RemoteRestoreArgs {
+    /// Server ID to restore
+    server: String,
+
+    /// Restic snapshot ID to restore, or 'latest'
+    #[arg(long, default_value = "latest")]
+    snapshot: String,
+
+    /// Restore mode override. Defaults to the server's configured restore mode.
+    #[arg(long, value_enum)]
+    mode: Option<RestoreModeArg>,
+
+    /// Preview restore changes without copying to the live server or stopping it
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RestoreModeArg {
+    World,
+    All,
+}
+
+#[derive(Args, Debug)]
 struct BackupSelection {
     /// Server ID to back up
     #[arg(required_unless_present = "all", conflicts_with = "all")]
@@ -114,19 +151,38 @@ struct BackupSelection {
 #[derive(Debug)]
 pub enum Action {
     Start,
-    Stop { stop_type: StopType },
-    BackupLocal { target: BackupTarget },
-    BackupRemote { target: BackupTarget },
-    BackupCleanup { dry_run: bool },
+    Stop {
+        stop_type: StopType,
+    },
+    BackupLocal {
+        target: BackupTarget,
+    },
+    BackupRemote {
+        target: BackupTarget,
+    },
+    BackupCleanup {
+        dry_run: bool,
+    },
     BackupStatus,
-    Restore { dry_run: bool },
+    RestoreLocal {
+        dry_run: bool,
+    },
+    RestoreRemote {
+        snapshot: String,
+        mode: Option<RestoreModeArg>,
+        dry_run: bool,
+    },
     Restart,
     Maintenance,
     Attach,
     Status,
     List,
-    ValidateConfig { fix: bool },
-    Completions { shell: Shell },
+    ValidateConfig {
+        fix: bool,
+    },
+    Completions {
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,7 +228,7 @@ where
             BackupCommands::Status => (Action::BackupStatus, None),
             BackupCommands::Cleanup { dry_run } => (Action::BackupCleanup { dry_run }, None),
         },
-        Commands::Restore { server, dry_run } => (Action::Restore { dry_run }, Some(server)),
+        Commands::Restore(args) => restore_action(args)?,
         Commands::Restart { server } => (Action::Restart, Some(server)),
         Commands::Maintenance => (Action::Maintenance, None),
         Commands::Attach { server } => (Action::Attach, Some(server)),
@@ -195,6 +251,33 @@ where
 pub fn generate_completions(shell: Shell) {
     let mut command = Cli::command();
     generate(shell, &mut command, "clserver", &mut std::io::stdout());
+}
+
+fn restore_action(args: RestoreArgs) -> std::result::Result<(Action, Option<String>), clap::Error> {
+    match args.command {
+        Some(RestoreCommands::Remote(remote)) => Ok((
+            Action::RestoreRemote {
+                snapshot: remote.snapshot,
+                mode: remote.mode,
+                dry_run: remote.dry_run,
+            },
+            Some(remote.server),
+        )),
+        None => {
+            let Some(server) = args.server else {
+                return Err(Cli::command().error(
+                    ErrorKind::MissingRequiredArgument,
+                    "restore requires a server ID or restore subcommand",
+                ));
+            };
+            Ok((
+                Action::RestoreLocal {
+                    dry_run: args.dry_run,
+                },
+                Some(server),
+            ))
+        }
+    }
 }
 
 enum ActionKind {
@@ -389,7 +472,10 @@ mod tests {
     fn parses_restore_subcommand() -> Result<()> {
         let request = parse_request_from(["clserver", "restore", "survival"])?;
 
-        assert!(matches!(request.action, Action::Restore { dry_run: false }));
+        assert!(matches!(
+            request.action,
+            Action::RestoreLocal { dry_run: false }
+        ));
         assert_eq!(request.server.as_deref(), Some("survival"));
         Ok(())
     }
@@ -398,9 +484,62 @@ mod tests {
     fn parses_restore_dry_run_subcommand() -> Result<()> {
         let request = parse_request_from(["clserver", "restore", "survival", "--dry-run"])?;
 
-        assert!(matches!(request.action, Action::Restore { dry_run: true }));
+        assert!(matches!(
+            request.action,
+            Action::RestoreLocal { dry_run: true }
+        ));
         assert_eq!(request.server.as_deref(), Some("survival"));
         Ok(())
+    }
+
+    #[test]
+    fn parses_restore_remote_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "restore", "remote", "survival"])?;
+
+        assert!(matches!(
+            request.action,
+            Action::RestoreRemote {
+                ref snapshot,
+                mode: None,
+                dry_run: false,
+            } if snapshot == "latest"
+        ));
+        assert_eq!(request.server.as_deref(), Some("survival"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_restore_remote_options() -> Result<()> {
+        let request = parse_request_from([
+            "clserver",
+            "restore",
+            "remote",
+            "survival",
+            "--snapshot",
+            "abc12345",
+            "--mode",
+            "all",
+            "--dry-run",
+        ])?;
+
+        assert!(matches!(
+            request.action,
+            Action::RestoreRemote {
+                ref snapshot,
+                mode: Some(RestoreModeArg::All),
+                dry_run: true,
+            } if snapshot == "abc12345"
+        ));
+        assert_eq!(request.server.as_deref(), Some("survival"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_restore_without_server_or_subcommand() {
+        let error = parse_request_from(["clserver", "restore"])
+            .expect_err("restore requires server or restore subcommand");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

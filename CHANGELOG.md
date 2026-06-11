@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Global `--config <path>` option for using a non-default config file.
 - `completions <shell>` command for generating shell completion scripts for bash, zsh, fish, PowerShell, and Elvish.
 - `restore <server>` command for restoring either the `world` directory or the full server backup with confirmation.
+- `restore remote <server>` command for staging a Restic snapshot under `<backup.localDir>/.restic-restore/<server-id>-<timestamp>` and restoring either `world` or the full server with rsync.
 - `--dry-run` support for `restore <server>` and `backup cleanup`.
 - Per-server `restore` setting with supported values `"world"` and `"all"`, defaulting to `"world"`.
 

@@ -3,7 +3,7 @@ use chrono::{DateTime, Local};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
@@ -24,6 +24,13 @@ pub struct LocalBackupStatus {
 pub struct RemoteSnapshotSummary {
     pub short_id: Option<String>,
     pub time: Option<String>,
+}
+
+pub struct RemoteRestorePlan {
+    temp_dir: PathBuf,
+    staged_source: PathBuf,
+    destination: PathBuf,
+    mode: RestoreMode,
 }
 
 #[derive(Deserialize)]
@@ -452,6 +459,162 @@ impl ServerManager {
         })
     }
 
+    pub fn stage_remote_restore(
+        &self,
+        snapshot: &str,
+        mode_override: Option<RestoreMode>,
+        dry_run: bool,
+    ) -> Result<RemoteRestorePlan> {
+        self.validate_remote_backup_environment()?;
+        let mode = mode_override.unwrap_or_else(|| self.config.restore.unwrap_or_default());
+        let backup_root = self.backup_root()?;
+        let temp_dir = backup_root.join(".restic-restore").join(format!(
+            "{}-{}",
+            self.server_id,
+            Local::now().format("%Y-%m-%d_%H-%M-%S")
+        ));
+        let restic_include = self.remote_restore_include_path(mode);
+        let staged_source = temp_dir.join(path_without_root(&restic_include));
+        let destination = self.restore_destination(mode);
+
+        println!(
+            "Remote restore{} for server '{}'",
+            if dry_run { " dry run" } else { "" },
+            self.server_id
+        );
+        println!("Server: {}", self.config.name);
+        println!("Snapshot: {snapshot}");
+        println!("Mode: {mode}");
+        println!("Restic include: {}", restic_include.display());
+        println!("Temporary restore directory: {}", temp_dir.display());
+        println!("Destination: {}", destination.display());
+        if dry_run {
+            println!(
+                "Restic data will be staged temporarily, but no live server files will be changed and the server will not be stopped."
+            );
+        }
+
+        fs::create_dir_all(&temp_dir).with_context(|| {
+            format!(
+                "Failed to create temporary restore directory '{}'",
+                temp_dir.display()
+            )
+        })?;
+        self.run_restic_restore(snapshot, &restic_include, &temp_dir)?;
+        ensure_path_exists(&staged_source, "remote restore staged source")?;
+
+        Ok(RemoteRestorePlan {
+            temp_dir,
+            staged_source,
+            destination,
+            mode,
+        })
+    }
+
+    pub fn confirm_remote_restore(&self, plan: &RemoteRestorePlan) -> Result<()> {
+        confirm_restore(
+            &self.server_id,
+            &self.config.name,
+            plan.mode,
+            &plan.staged_source,
+            &plan.destination,
+        )
+    }
+
+    pub fn apply_remote_restore(&self, plan: &RemoteRestorePlan, dry_run: bool) -> Result<()> {
+        let restore_result = (|| -> Result<()> {
+            if !dry_run {
+                if matches!(plan.mode, RestoreMode::World) {
+                    fs::create_dir_all(&plan.destination).with_context(|| {
+                        format!(
+                            "Failed to create restore destination directory '{}'",
+                            plan.destination.display()
+                        )
+                    })?;
+                } else if let Some(parent) = plan.destination.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!(
+                            "Failed to create restore destination parent directory '{}'",
+                            parent.display()
+                        )
+                    })?;
+                }
+            }
+
+            let source = format_path_with_trailing_slash(&plan.staged_source);
+            run_rsync(
+                &source,
+                &plan.destination,
+                "remote restore",
+                &self.config.name,
+                dry_run,
+            )
+        })();
+
+        match restore_result {
+            Ok(()) => {
+                self.cleanup_remote_restore_plan(plan);
+                if dry_run {
+                    info!(server = %self.config.name, restore_mode = %plan.mode, "remote restore dry run completed");
+                } else {
+                    info!(server = %self.config.name, restore_mode = %plan.mode, "remote restore completed");
+                }
+                Ok(())
+            }
+            Err(err) => Err(err).context(format!(
+                "Remote restore failed; temporary restore data kept at '{}'",
+                plan.temp_dir.display()
+            )),
+        }
+    }
+
+    pub fn cleanup_remote_restore_plan(&self, plan: &RemoteRestorePlan) {
+        if let Err(err) = fs::remove_dir_all(&plan.temp_dir) {
+            warn!(temp_dir = %plan.temp_dir.display(), error = %err, "failed to remove temporary remote restore directory");
+        }
+    }
+
+    fn run_restic_restore(&self, snapshot: &str, include: &Path, target: &Path) -> Result<()> {
+        info!(server = %self.config.name, snapshot, include = %include.display(), target = %target.display(), "starting remote restic restore staging");
+        let mut command = Command::new("restic");
+        apply_restic_env(&mut command, self.restic_env_file.as_deref())?;
+        let status = command
+            .arg("restore")
+            .arg(snapshot)
+            .arg("--target")
+            .arg(target)
+            .arg("--include")
+            .arg(include)
+            .status()
+            .context("Failed to run 'restic restore' for remote server restore")?;
+
+        if !status.success() {
+            error!(server = %self.config.name, snapshot, exit_code = ?status.code(), "remote restic restore staging failed");
+            bail!(
+                "Remote restore staging failed for server '{}'. Return code: {:?}",
+                self.config.name,
+                status.code()
+            );
+        }
+
+        info!(server = %self.config.name, snapshot, "remote restic restore staging completed");
+        Ok(())
+    }
+
+    fn remote_restore_include_path(&self, mode: RestoreMode) -> PathBuf {
+        match mode {
+            RestoreMode::World => self.server_dir.join("world"),
+            RestoreMode::All => self.server_dir.clone(),
+        }
+    }
+
+    fn restore_destination(&self, mode: RestoreMode) -> PathBuf {
+        match mode {
+            RestoreMode::World => self.server_dir.join("world"),
+            RestoreMode::All => self.server_dir.clone(),
+        }
+    }
+
     fn restore_paths(&self, mode: RestoreMode) -> Result<(PathBuf, PathBuf)> {
         let backup_server_dir = self.backup_root()?.join(&self.config.name);
 
@@ -765,6 +928,15 @@ fn capitalize(value: &str) -> String {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
     }
+}
+
+fn path_without_root(path: &Path) -> PathBuf {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect()
 }
 
 fn format_path_with_trailing_slash(path: &Path) -> String {

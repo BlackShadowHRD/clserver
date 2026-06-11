@@ -4,8 +4,8 @@ pub mod minecraft;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::cli::{Action, BackupTarget, Request, StopType};
-use crate::config::{self, Config, ServerType};
+use crate::cli::{Action, BackupTarget, Request, RestoreModeArg, StopType};
+use crate::config::{self, Config, RestoreMode, ServerType};
 use chrono::{Datelike, Local, Weekday};
 use std::thread;
 use tracing::{info, warn};
@@ -92,7 +92,8 @@ fn action_needs_minecraft_rcon(action: &Action) -> bool {
             | Action::Restart
             | Action::BackupLocal { .. }
             | Action::BackupRemote { .. }
-            | Action::Restore { dry_run: false }
+            | Action::RestoreLocal { dry_run: false }
+            | Action::RestoreRemote { dry_run: false, .. }
     )
 }
 
@@ -102,7 +103,12 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
         Action::Stop { stop_type } => server.stop_server_and_wait(stop_type),
         Action::BackupLocal { .. } => backup_minecraft_server(server, BackupKind::Local),
         Action::BackupRemote { .. } => backup_minecraft_server(server, BackupKind::Remote),
-        Action::Restore { dry_run } => restore_minecraft_server(server, dry_run),
+        Action::RestoreLocal { dry_run } => restore_minecraft_server(server, dry_run),
+        Action::RestoreRemote {
+            snapshot,
+            mode,
+            dry_run,
+        } => remote_restore_minecraft_server(server, &snapshot, mode, dry_run),
         Action::Restart => server.restart_server(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
@@ -134,7 +140,12 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
         }
         Action::BackupLocal { .. } => backup_generic_server(&server.manager, BackupKind::Local),
         Action::BackupRemote { .. } => backup_generic_server(&server.manager, BackupKind::Remote),
-        Action::Restore { dry_run } => restore_generic_server(&server.manager, dry_run),
+        Action::RestoreLocal { dry_run } => restore_generic_server(&server.manager, dry_run),
+        Action::RestoreRemote {
+            snapshot,
+            mode,
+            dry_run,
+        } => remote_restore_generic_server(&server.manager, &snapshot, mode, dry_run),
         Action::Restart => server.manager.restart_with_stop_command(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
@@ -237,6 +248,32 @@ fn restore_minecraft_server(server: &MinecraftServer, dry_run: bool) -> Result<(
     restore_result
 }
 
+fn remote_restore_minecraft_server(
+    server: &MinecraftServer,
+    snapshot: &str,
+    mode: Option<RestoreModeArg>,
+    dry_run: bool,
+) -> Result<()> {
+    let plan =
+        server
+            .manager
+            .stage_remote_restore(snapshot, mode.map(restore_mode_from_arg), dry_run)?;
+
+    if dry_run {
+        server.manager.apply_remote_restore(&plan, true)
+    } else {
+        server.manager.confirm_remote_restore(&plan).and_then(|()| {
+            restore_with_stop_restart(
+                &server.manager,
+                false,
+                || server.stop_server(StopType::Friendly),
+                || server.start_server(),
+                || server.manager.apply_remote_restore(&plan, false),
+            )
+        })
+    }
+}
+
 fn restore_generic_server(manager: &ServerManager, dry_run: bool) -> Result<()> {
     let was_running = manager.screen_session_exists()?;
 
@@ -260,6 +297,67 @@ fn restore_generic_server(manager: &ServerManager, dry_run: bool) -> Result<()> 
     }
 
     restore_result
+}
+
+fn remote_restore_generic_server(
+    manager: &ServerManager,
+    snapshot: &str,
+    mode: Option<RestoreModeArg>,
+    dry_run: bool,
+) -> Result<()> {
+    let plan = manager.stage_remote_restore(snapshot, mode.map(restore_mode_from_arg), dry_run)?;
+
+    if dry_run {
+        manager.apply_remote_restore(&plan, true)
+    } else {
+        manager.confirm_remote_restore(&plan).and_then(|()| {
+            restore_with_stop_restart(
+                manager,
+                false,
+                || manager.stop_with_stop_command(),
+                || manager.start_server(),
+                || manager.apply_remote_restore(&plan, false),
+            )
+        })
+    }
+}
+
+fn restore_with_stop_restart(
+    manager: &ServerManager,
+    dry_run: bool,
+    stop: impl FnOnce() -> Result<()>,
+    start: impl FnOnce() -> Result<()>,
+    restore: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let was_running = manager.screen_session_exists()?;
+
+    if was_running && !dry_run {
+        stop()?;
+        ensure_manager_stopped(manager)?;
+    }
+
+    let restore_result = restore();
+
+    if was_running
+        && !dry_run
+        && let Err(start_err) = start()
+    {
+        return match restore_result {
+            Ok(()) => Err(start_err).context("Restore completed, but failed to restart server"),
+            Err(restore_err) => Err(restore_err).context(format!(
+                "Restore failed, and server restart also failed: {start_err:#}"
+            )),
+        };
+    }
+
+    restore_result
+}
+
+fn restore_mode_from_arg(mode: RestoreModeArg) -> RestoreMode {
+    match mode {
+        RestoreModeArg::World => RestoreMode::World,
+        RestoreModeArg::All => RestoreMode::All,
+    }
 }
 
 fn run_maintenance(config: &mut Config) -> Result<()> {

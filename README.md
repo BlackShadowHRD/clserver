@@ -515,11 +515,34 @@ Restore a server from its local backup:
 clserver restore survival
 ```
 
-Preview restore changes without copying, overwriting, deleting files, or stopping a running server:
+Preview local restore changes without copying, overwriting, deleting files, or stopping a running server:
 
 ```sh
 clserver restore survival --dry-run
 ```
+
+Restore from a remote Restic snapshot instead of the local mirror:
+
+```sh
+clserver restore remote survival
+clserver restore remote survival --snapshot latest
+clserver restore remote survival --snapshot abc12345
+```
+
+Override the restore mode for a remote restore:
+
+```sh
+clserver restore remote survival --mode world
+clserver restore remote survival --mode all
+```
+
+Preview a remote restore:
+
+```sh
+clserver restore remote survival --dry-run
+```
+
+Remote restore stages Restic data under `<backup.localDir>/.restic-restore/<server-id>-<timestamp>`, then uses `rsync -av --delete` from the staged data into the live server path. For real remote restores, Restic staging happens before the server is stopped; the server is stopped only for the final rsync into the live directory. The temporary restore directory is removed on success and kept for inspection on failure.
 
 A real restore always asks for confirmation before copying files back into the server directory. The configured `restore` mode controls what is restored:
 
@@ -578,7 +601,7 @@ RESTIC_REPOSITORY='s3:s3.eu-west-3.idrivee2.com/clserver'
 RESTIC_PASSWORD_FILE='/home/blackshadow/.config/clserver/secrets/restic.pwd'
 ```
 
-`clserver backup remote` runs restic with tags for `clserver`, `server-id:<id>`, and `server-name:<name>`. `clserver backup status` uses those tags to query the latest snapshot per server with `restic snapshots --latest 1 --json`. Remote cleanup uses:
+`clserver backup remote` runs restic with tags for `clserver`, `server-id:<id>`, and `server-name:<name>`. `clserver backup status` uses those tags to query the latest snapshot per server with `restic snapshots --latest 1 --json`. `clserver restore remote` restores a selected snapshot into `<backup.localDir>/.restic-restore/<server-id>-<timestamp>` before rsyncing the requested restore scope into the live server directory. Remote cleanup uses:
 
 ```sh
 restic forget --keep-daily 56 --prune

@@ -34,7 +34,9 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
         Action::BackupRemote {
             target: BackupTarget::All,
         } => return backup_all_servers(&mut config, BackupKind::Remote),
-        Action::BackupCleanup => return cleanup_remote_backups(&config.backup),
+        Action::BackupCleanup { dry_run } => {
+            return cleanup_remote_backups(&config.backup, *dry_run);
+        }
         Action::BackupStatus => return backup_status(&config),
         _ => {}
     }
@@ -90,7 +92,7 @@ fn action_needs_minecraft_rcon(action: &Action) -> bool {
             | Action::Restart
             | Action::BackupLocal { .. }
             | Action::BackupRemote { .. }
-            | Action::Restore
+            | Action::Restore { dry_run: false }
     )
 }
 
@@ -100,11 +102,11 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
         Action::Stop { stop_type } => server.stop_server_and_wait(stop_type),
         Action::BackupLocal { .. } => backup_minecraft_server(server, BackupKind::Local),
         Action::BackupRemote { .. } => backup_minecraft_server(server, BackupKind::Remote),
-        Action::Restore => restore_minecraft_server(server),
+        Action::Restore { dry_run } => restore_minecraft_server(server, dry_run),
         Action::Restart => server.restart_server(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
-        Action::BackupCleanup
+        Action::BackupCleanup { .. }
         | Action::BackupStatus
         | Action::Maintenance
         | Action::List
@@ -132,11 +134,11 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
         }
         Action::BackupLocal { .. } => backup_generic_server(&server.manager, BackupKind::Local),
         Action::BackupRemote { .. } => backup_generic_server(&server.manager, BackupKind::Remote),
-        Action::Restore => restore_generic_server(&server.manager),
+        Action::Restore { dry_run } => restore_generic_server(&server.manager, dry_run),
         Action::Restart => server.manager.restart_with_stop_command(),
         Action::Attach => server.manager.attach_server(),
         Action::Status => server.manager.status_server(),
-        Action::BackupCleanup
+        Action::BackupCleanup { .. }
         | Action::BackupStatus
         | Action::Maintenance
         | Action::List
@@ -210,17 +212,20 @@ fn run_manager_backup(manager: &ServerManager, kind: BackupKind) -> Result<()> {
     }
 }
 
-fn restore_minecraft_server(server: &MinecraftServer) -> Result<()> {
+fn restore_minecraft_server(server: &MinecraftServer, dry_run: bool) -> Result<()> {
     let was_running = server.manager.screen_session_exists()?;
 
-    if was_running {
+    if was_running && !dry_run {
         server.stop_server(StopType::Friendly)?;
         ensure_manager_stopped(&server.manager)?;
     }
 
-    let restore_result = server.manager.restore_server();
+    let restore_result = server.manager.restore_server(dry_run);
 
-    if was_running && let Err(start_err) = server.start_server() {
+    if was_running
+        && !dry_run
+        && let Err(start_err) = server.start_server()
+    {
         return match restore_result {
             Ok(()) => Err(start_err).context("Restore completed, but failed to restart server"),
             Err(restore_err) => Err(restore_err).context(format!(
@@ -232,17 +237,20 @@ fn restore_minecraft_server(server: &MinecraftServer) -> Result<()> {
     restore_result
 }
 
-fn restore_generic_server(manager: &ServerManager) -> Result<()> {
+fn restore_generic_server(manager: &ServerManager, dry_run: bool) -> Result<()> {
     let was_running = manager.screen_session_exists()?;
 
-    if was_running {
+    if was_running && !dry_run {
         manager.stop_with_stop_command()?;
         ensure_manager_stopped(manager)?;
     }
 
-    let restore_result = manager.restore_server();
+    let restore_result = manager.restore_server(dry_run);
 
-    if was_running && let Err(start_err) = manager.start_server() {
+    if was_running
+        && !dry_run
+        && let Err(start_err) = manager.start_server()
+    {
         return match restore_result {
             Ok(()) => Err(start_err).context("Restore completed, but failed to restart server"),
             Err(restore_err) => Err(restore_err).context(format!(
@@ -329,7 +337,7 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
     if failures.is_empty() {
         if is_monday() && should_run_cleanup {
             log_maintenance_phase("monday remote backup cleanup");
-            cleanup_remote_backups(&config.backup)
+            cleanup_remote_backups(&config.backup, false)
                 .context("Daily maintenance backups completed, but remote cleanup failed")?;
         } else {
             info!(

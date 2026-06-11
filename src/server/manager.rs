@@ -349,7 +349,7 @@ impl ServerManager {
         let source = format_path_with_trailing_slash(&self.server_dir);
         info!(server = %self.config.name, source = %source, destination = %destination.display(), "starting server backup");
 
-        run_rsync(&source, &destination, "backup", &self.config.name)?;
+        run_rsync(&source, &destination, "backup", &self.config.name, false)?;
 
         info!(server = %self.config.name, destination = %destination.display(), "server backup completed");
         Ok(())
@@ -390,41 +390,56 @@ impl ServerManager {
         Ok(())
     }
 
-    pub fn restore_server(&self) -> Result<()> {
+    pub fn restore_server(&self, dry_run: bool) -> Result<()> {
         let mode = self.config.restore.unwrap_or_default();
         let (source, destination) = self.restore_paths(mode)?;
 
         ensure_path_exists(&source, "restore source")?;
-        confirm_restore(
-            &self.server_id,
-            &self.config.name,
-            mode,
-            &source,
-            &destination,
-        )?;
+        if dry_run {
+            println!("Restore dry run for server '{}'", self.server_id);
+            println!("Server: {}", self.config.name);
+            println!("Mode: {mode}");
+            println!("Source: {}", source.display());
+            println!("Destination: {}", destination.display());
+            println!("No files will be copied, overwritten, or deleted.");
+        } else {
+            confirm_restore(
+                &self.server_id,
+                &self.config.name,
+                mode,
+                &source,
+                &destination,
+            )?;
+        }
 
-        if matches!(mode, RestoreMode::World) {
-            fs::create_dir_all(&destination).with_context(|| {
-                format!(
-                    "Failed to create restore destination directory '{}'",
-                    destination.display()
-                )
-            })?;
-        } else if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create restore destination parent directory '{}'",
-                    parent.display()
-                )
-            })?;
+        if !dry_run {
+            if matches!(mode, RestoreMode::World) {
+                fs::create_dir_all(&destination).with_context(|| {
+                    format!(
+                        "Failed to create restore destination directory '{}'",
+                        destination.display()
+                    )
+                })?;
+            } else if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "Failed to create restore destination parent directory '{}'",
+                        parent.display()
+                    )
+                })?;
+            }
         }
 
         let source = format_path_with_trailing_slash(&source);
-        info!(server = %self.config.name, restore_mode = %mode, source = %source, destination = %destination.display(), "starting server restore");
+        info!(server = %self.config.name, restore_mode = %mode, source = %source, destination = %destination.display(), dry_run, "starting server restore");
 
-        run_rsync(&source, &destination, "restore", &self.config.name)?;
+        run_rsync(&source, &destination, "restore", &self.config.name, dry_run)?;
 
-        info!(server = %self.config.name, restore_mode = %mode, destination = %destination.display(), "server restore completed");
+        if dry_run {
+            info!(server = %self.config.name, restore_mode = %mode, destination = %destination.display(), "server restore dry run completed");
+        } else {
+            info!(server = %self.config.name, restore_mode = %mode, destination = %destination.display(), "server restore completed");
+        }
         Ok(())
     }
 
@@ -503,29 +518,38 @@ pub fn format_system_time(time: SystemTime) -> String {
     time.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-pub fn cleanup_remote_backups(backup: &BackupConfig) -> Result<()> {
+pub fn cleanup_remote_backups(backup: &BackupConfig, dry_run: bool) -> Result<()> {
     validate_restic_environment(backup.restic_env_file.as_deref())?;
-    info!(keep_daily = 56, "starting remote restic retention cleanup");
+    info!(
+        keep_daily = 56,
+        dry_run, "starting remote restic retention cleanup"
+    );
 
     let mut command = Command::new("restic");
     apply_restic_env(&mut command, backup.restic_env_file.as_deref())?;
+    command.arg("forget").arg("--keep-daily").arg("56");
+    if dry_run {
+        command.arg("--dry-run");
+    } else {
+        command.arg("--prune");
+    }
     let status = command
-        .arg("forget")
-        .arg("--keep-daily")
-        .arg("56")
-        .arg("--prune")
         .status()
         .context("Failed to run 'restic forget' for remote backup cleanup")?;
 
     if !status.success() {
-        error!(exit_code = ?status.code(), "remote restic retention cleanup failed");
+        error!(exit_code = ?status.code(), dry_run, "remote restic retention cleanup failed");
         bail!(
             "Remote backup cleanup failed. Return code: {:?}",
             status.code()
         );
     }
 
-    info!("remote restic retention cleanup completed");
+    if dry_run {
+        info!("remote restic retention cleanup dry run completed");
+    } else {
+        info!("remote restic retention cleanup completed");
+    }
     Ok(())
 }
 
@@ -657,17 +681,26 @@ fn strip_inline_comment(value: &str) -> &str {
     value
 }
 
-fn run_rsync(source: &str, destination: &Path, operation: &str, server_name: &str) -> Result<()> {
-    let status = Command::new("rsync")
-        .arg("-av")
-        .arg("--delete")
+fn run_rsync(
+    source: &str,
+    destination: &Path,
+    operation: &str,
+    server_name: &str,
+    dry_run: bool,
+) -> Result<()> {
+    let mut command = Command::new("rsync");
+    command.arg("-av").arg("--delete");
+    if dry_run {
+        command.arg("--dry-run");
+    }
+    let status = command
         .arg(source)
         .arg(destination)
         .status()
         .with_context(|| format!("Failed to run 'rsync' for server {operation}"))?;
 
     if !status.success() {
-        error!(server = %server_name, operation, exit_code = ?status.code(), "server rsync operation failed");
+        error!(server = %server_name, operation, dry_run, exit_code = ?status.code(), "server rsync operation failed");
         bail!(
             "{} failed for server '{}'. Return code: {:?}",
             capitalize(operation),

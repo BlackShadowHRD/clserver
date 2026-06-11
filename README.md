@@ -490,6 +490,12 @@ Run remote restic retention cleanup immediately:
 clserver backup cleanup
 ```
 
+Preview remote restic retention cleanup without forgetting or pruning snapshots:
+
+```sh
+clserver backup cleanup --dry-run
+```
+
 Named interactive backups ignore the server's `backup` setting, so `clserver backup local survival` and `clserver backup remote survival` force that specific backup. `--all` only processes servers with `backup = true`.
 
 If the target server is running, backup stops it, waits for the `screen` session to exit, runs the backup, and then starts it again. Minecraft servers use friendly shutdown for this flow; other server types use their configured `stopCommand`. If the server was already stopped, it is backed up without being started afterward.
@@ -500,7 +506,13 @@ Restore a server from its local backup:
 clserver restore survival
 ```
 
-Restore always asks for confirmation before copying files back into the server directory. The configured `restore` mode controls what is restored:
+Preview restore changes without copying, overwriting, deleting files, or stopping a running server:
+
+```sh
+clserver restore survival --dry-run
+```
+
+A real restore always asks for confirmation before copying files back into the server directory. The configured `restore` mode controls what is restored:
 
 ```toml
 restore = "world" # default; restore only the world directory
@@ -561,6 +573,12 @@ RESTIC_PASSWORD_FILE='/home/blackshadow/.config/clserver/secrets/restic.pwd'
 
 ```sh
 restic forget --keep-daily 56 --prune
+```
+
+Cleanup dry-run uses:
+
+```sh
+restic forget --keep-daily 56 --dry-run
 ```
 
 This keeps daily restore points for roughly eight weeks.

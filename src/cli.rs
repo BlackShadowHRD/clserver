@@ -38,7 +38,13 @@ enum Commands {
     },
 
     /// Restore the named server from its configured backup
-    Restore { server: String },
+    Restore {
+        server: String,
+
+        /// Preview restore changes without copying or deleting files
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Restart the named server
     Restart { server: String },
@@ -82,7 +88,11 @@ enum BackupCommands {
     Status,
 
     /// Run backup retention cleanup
-    Cleanup,
+    Cleanup {
+        /// Preview snapshots that would be forgotten without pruning or deleting anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -102,9 +112,9 @@ pub enum Action {
     Stop { stop_type: StopType },
     BackupLocal { target: BackupTarget },
     BackupRemote { target: BackupTarget },
-    BackupCleanup,
+    BackupCleanup { dry_run: bool },
     BackupStatus,
-    Restore,
+    Restore { dry_run: bool },
     Restart,
     Maintenance,
     Attach,
@@ -154,9 +164,9 @@ where
             BackupCommands::Local(selection) => backup_action(ActionKind::Local, selection),
             BackupCommands::Remote(selection) => backup_action(ActionKind::Remote, selection),
             BackupCommands::Status => (Action::BackupStatus, None),
-            BackupCommands::Cleanup => (Action::BackupCleanup, None),
+            BackupCommands::Cleanup { dry_run } => (Action::BackupCleanup { dry_run }, None),
         },
-        Commands::Restore { server } => (Action::Restore, Some(server)),
+        Commands::Restore { server, dry_run } => (Action::Restore { dry_run }, Some(server)),
         Commands::Restart { server } => (Action::Restart, Some(server)),
         Commands::Maintenance => (Action::Maintenance, None),
         Commands::Attach { server } => (Action::Attach, Some(server)),
@@ -334,7 +344,16 @@ mod tests {
     fn parses_restore_subcommand() -> Result<()> {
         let request = parse_request_from(["clserver", "restore", "survival"])?;
 
-        assert!(matches!(request.action, Action::Restore));
+        assert!(matches!(request.action, Action::Restore { dry_run: false }));
+        assert_eq!(request.server.as_deref(), Some("survival"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_restore_dry_run_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "restore", "survival", "--dry-run"])?;
+
+        assert!(matches!(request.action, Action::Restore { dry_run: true }));
         assert_eq!(request.server.as_deref(), Some("survival"));
         Ok(())
     }
@@ -380,7 +399,22 @@ mod tests {
     fn parses_backup_cleanup_subcommand() -> Result<()> {
         let request = parse_request_from(["clserver", "backup", "cleanup"])?;
 
-        assert!(matches!(request.action, Action::BackupCleanup));
+        assert!(matches!(
+            request.action,
+            Action::BackupCleanup { dry_run: false }
+        ));
+        assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_backup_cleanup_dry_run_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "backup", "cleanup", "--dry-run"])?;
+
+        assert!(matches!(
+            request.action,
+            Action::BackupCleanup { dry_run: true }
+        ));
         assert_eq!(request.server, None);
         Ok(())
     }

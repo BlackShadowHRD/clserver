@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `--version` / `-V` CLI flag powered by the Cargo package version.
 - `completions <shell>` command for generating shell completion scripts for bash, zsh, fish, PowerShell, and Elvish.
 - `restore <server>` command for restoring either the `world` directory or the full server backup with confirmation.
+- `--dry-run` support for `restore <server>` and `backup cleanup`.
 - Per-server `restore` setting with supported values `"world"` and `"all"`, defaulting to `"world"`.
 
 ### Changed

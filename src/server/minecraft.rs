@@ -8,7 +8,7 @@ use crate::config::{BackupConfig, GlobalConfig, ServerConfig};
 use crate::rcon::RconClient;
 use tracing::{info, warn};
 
-use super::manager::ServerManager;
+use super::manager::{DEFAULT_STOP_POLL_INTERVAL, DEFAULT_STOP_TIMEOUT, ServerManager};
 
 pub struct MinecraftServer {
     pub manager: ServerManager,
@@ -49,6 +49,12 @@ impl MinecraftServer {
             StopType::Friendly => self.friendly_stop(),
             StopType::Immediate => self.immediate_stop(),
         }
+    }
+
+    pub fn stop_server_and_wait(&self, stop_type: StopType) -> Result<()> {
+        self.stop_server(stop_type)?;
+        self.manager
+            .wait_until_stopped_or_timeout(DEFAULT_STOP_TIMEOUT, DEFAULT_STOP_POLL_INTERVAL)
     }
 
     fn friendly_stop(&self) -> Result<()> {
@@ -106,8 +112,7 @@ impl MinecraftServer {
     }
 
     pub fn restart_server(&self) -> Result<()> {
-        self.stop_server(StopType::Immediate)?;
-        sleep(Duration::from_secs(10));
+        self.stop_server_and_wait(StopType::Immediate)?;
         self.start_server()
     }
 

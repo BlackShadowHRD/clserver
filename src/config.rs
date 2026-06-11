@@ -291,11 +291,12 @@ pub fn restic_environment_check_success_message(config: &Config) -> Option<Strin
     has_backup_enabled_servers(config).then(|| {
         if let Some(env_file) = config.backup.restic_env_file.as_ref() {
             format!(
-                "Remote backup Restic environment check valid using '{}'.",
+                "Remote backup Restic environment variables valid using '{}'.",
                 env_file.display()
             )
         } else {
-            "Remote backup Restic environment check valid using process environment.".to_string()
+            "Remote backup Restic environment variables valid using process environment."
+                .to_string()
         }
     })
 }
@@ -1054,7 +1055,7 @@ mod tests {
 
         let message = restic_environment_check_success_message(&config)
             .expect("backup-enabled config should report restic check success");
-        assert!(message.contains("Remote backup Restic environment check valid"));
+        assert!(message.contains("Remote backup Restic environment variables valid"));
         assert!(message.contains(&restic_env.display().to_string()));
     }
 

@@ -11,6 +11,9 @@ use std::time::{Duration, SystemTime};
 use crate::config::{BackupConfig, GlobalConfig, RestoreMode, ServerConfig, resolve_java_bin};
 use tracing::{debug, error, info, warn};
 
+pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(900);
+pub const DEFAULT_STOP_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
 pub struct ServerManager {
     pub server_id: String,
     pub config: ServerConfig,
@@ -164,9 +167,13 @@ impl ServerManager {
         Ok(())
     }
 
-    pub fn restart_with_stop_command(&self) -> Result<()> {
+    pub fn stop_with_stop_command_and_wait(&self) -> Result<()> {
         self.stop_with_stop_command()?;
-        sleep(Duration::from_secs(10));
+        self.wait_until_stopped_or_timeout(DEFAULT_STOP_TIMEOUT, DEFAULT_STOP_POLL_INTERVAL)
+    }
+
+    pub fn restart_with_stop_command(&self) -> Result<()> {
+        self.stop_with_stop_command_and_wait()?;
         self.start_server()
     }
 
@@ -184,6 +191,21 @@ impl ServerManager {
 
         warn!(server = %self.config.name, timeout_seconds = timeout.as_secs(), "timed out waiting for server to stop");
         Ok(false)
+    }
+
+    pub fn wait_until_stopped_or_timeout(
+        &self,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<()> {
+        if self.wait_until_stopped(timeout, poll_interval)? {
+            Ok(())
+        } else {
+            bail!(
+                "Timed out waiting for server '{}' to stop",
+                self.config.name
+            );
+        }
     }
 
     pub fn attach_server(&self) -> Result<()> {

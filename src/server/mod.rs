@@ -8,15 +8,13 @@ use crate::cli::{Action, BackupTarget, Request, StopType};
 use crate::config::{self, Config, ServerType};
 use chrono::{Datelike, Local, Weekday};
 use std::thread;
-use std::time::Duration;
 use tracing::{info, warn};
 
 use generic::GenericServer;
-use manager::{ServerManager, cleanup_remote_backups};
+use manager::{
+    DEFAULT_STOP_POLL_INTERVAL, DEFAULT_STOP_TIMEOUT, ServerManager, cleanup_remote_backups,
+};
 use minecraft::MinecraftServer;
-
-const MAINTENANCE_STOP_TIMEOUT: Duration = Duration::from_secs(900);
-const MAINTENANCE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
     if let Action::ValidateConfig { fix } = request.action {
@@ -97,7 +95,7 @@ fn action_needs_minecraft_rcon(action: &Action) -> bool {
 fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
     match action {
         Action::Start => server.start_server(),
-        Action::Stop { stop_type } => server.stop_server(stop_type),
+        Action::Stop { stop_type } => server.stop_server_and_wait(stop_type),
         Action::BackupLocal { .. } => backup_minecraft_server(server, BackupKind::Local),
         Action::BackupRemote { .. } => backup_minecraft_server(server, BackupKind::Remote),
         Action::Restore => restore_minecraft_server(server),
@@ -118,14 +116,14 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
             if server.manager.config.server_type == ServerType::Velocity
                 || stop_type == StopType::Immediate
             {
-                server.manager.stop_with_stop_command()
+                server.manager.stop_with_stop_command_and_wait()
             } else {
                 warn!(
                     stop_type = ?stop_type,
                     server_type = %server.manager.config.server_type,
                     "unsupported stop type for server type; falling back to configured stop command"
                 );
-                server.manager.stop_with_stop_command()
+                server.manager.stop_with_stop_command_and_wait()
             }
         }
         Action::BackupLocal { .. } => backup_generic_server(&server.manager, BackupKind::Local),
@@ -629,9 +627,9 @@ impl MaintenanceServer {
         match self {
             Self::Minecraft(server) => server
                 .manager
-                .wait_until_stopped(MAINTENANCE_STOP_TIMEOUT, MAINTENANCE_POLL_INTERVAL),
+                .wait_until_stopped(DEFAULT_STOP_TIMEOUT, DEFAULT_STOP_POLL_INTERVAL),
             Self::Generic(manager) => {
-                manager.wait_until_stopped(MAINTENANCE_STOP_TIMEOUT, MAINTENANCE_POLL_INTERVAL)
+                manager.wait_until_stopped(DEFAULT_STOP_TIMEOUT, DEFAULT_STOP_POLL_INTERVAL)
             }
         }
     }
@@ -746,7 +744,7 @@ fn ensure_stopped(server: &MaintenanceServer) -> Result<()> {
 }
 
 fn ensure_manager_stopped(manager: &ServerManager) -> Result<()> {
-    if manager.wait_until_stopped(MAINTENANCE_STOP_TIMEOUT, MAINTENANCE_POLL_INTERVAL)? {
+    if manager.wait_until_stopped(DEFAULT_STOP_TIMEOUT, DEFAULT_STOP_POLL_INTERVAL)? {
         Ok(())
     } else {
         bail!(

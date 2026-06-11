@@ -9,7 +9,6 @@ use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
 use crate::config::{BackupConfig, GlobalConfig, RestoreMode, ServerConfig, resolve_java_bin};
-use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
 pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(900);
@@ -26,27 +25,11 @@ pub struct RemoteSnapshotSummary {
     pub time: Option<String>,
 }
 
-pub struct RemoteSnapshotDetails {
-    pub short_id: String,
-    pub time: String,
-    pub hostname: String,
-    pub paths: Vec<String>,
-}
-
 pub struct RemoteRestorePlan {
     temp_dir: PathBuf,
     staged_source: PathBuf,
     destination: PathBuf,
     mode: RestoreMode,
-}
-
-#[derive(Deserialize)]
-struct ResticSnapshot {
-    time: Option<String>,
-    short_id: Option<String>,
-    id: Option<String>,
-    hostname: Option<String>,
-    paths: Option<Vec<String>>,
 }
 
 pub struct ServerManager {
@@ -641,20 +624,79 @@ pub fn latest_remote_snapshot(
     backup: &BackupConfig,
     server_id: &str,
 ) -> Result<Option<RemoteSnapshotSummary>> {
-    Ok(remote_snapshots(backup, server_id, 1)?
-        .into_iter()
-        .next()
-        .map(|snapshot| RemoteSnapshotSummary {
-            short_id: Some(snapshot.short_id),
-            time: Some(snapshot.time),
-        }))
+    validate_restic_environment(backup.restic_env_file.as_deref())?;
+
+    let mut command = Command::new("restic");
+    apply_restic_env(&mut command, backup.restic_env_file.as_deref())?;
+    let output = command
+        .arg("snapshots")
+        .arg("--latest")
+        .arg("1")
+        .arg("--tag")
+        .arg("clserver")
+        .arg("--tag")
+        .arg(format!("server-id:{server_id}"))
+        .output()
+        .context("Failed to run 'restic snapshots' for backup status")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "Restic snapshot status failed for server '{}'. Return code: {:?}{}",
+            server_id,
+            output.status.code(),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_latest_restic_snapshot_summary(&stdout))
 }
 
-pub fn remote_snapshots(
-    backup: &BackupConfig,
-    server_id: &str,
-    latest: usize,
-) -> Result<Vec<RemoteSnapshotDetails>> {
+fn parse_latest_restic_snapshot_summary(output: &str) -> Option<RemoteSnapshotSummary> {
+    output.lines().find_map(parse_restic_snapshot_summary_line)
+}
+
+fn parse_restic_snapshot_summary_line(line: &str) -> Option<RemoteSnapshotSummary> {
+    let mut parts = line.split_whitespace();
+    let snapshot_id = parts.next()?;
+    if !is_restic_snapshot_id(snapshot_id) {
+        return None;
+    }
+
+    let date = parts.next()?;
+    let time = parts.next()?;
+    if !looks_like_restic_date(date) || !looks_like_restic_time(time) {
+        return None;
+    }
+
+    Some(RemoteSnapshotSummary {
+        short_id: Some(snapshot_id.to_string()),
+        time: Some(format!("{date} {time}")),
+    })
+}
+
+fn is_restic_snapshot_id(value: &str) -> bool {
+    value.len() >= 8 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn looks_like_restic_date(value: &str) -> bool {
+    value.len() == 10
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+}
+
+fn looks_like_restic_time(value: &str) -> bool {
+    value.len() >= 8
+        && value.as_bytes().get(2) == Some(&b':')
+        && value.as_bytes().get(5) == Some(&b':')
+}
+
+pub fn print_remote_snapshots(backup: &BackupConfig, server_id: &str, latest: usize) -> Result<()> {
     validate_restic_environment(backup.restic_env_file.as_deref())?;
 
     let mut command = Command::new("restic");
@@ -668,43 +710,20 @@ pub fn remote_snapshots(
     if latest > 0 {
         command.arg("--latest").arg(latest.to_string());
     }
-    let output = command
-        .arg("--json")
-        .output()
+
+    let status = command
+        .status()
         .context("Failed to run 'restic snapshots' for backup snapshots")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !status.success() {
         bail!(
-            "Restic snapshot listing failed for server '{}'. Return code: {:?}{}",
+            "Restic snapshot listing failed for server '{}'. Return code: {:?}",
             server_id,
-            output.status.code(),
-            if stderr.is_empty() {
-                String::new()
-            } else {
-                format!(": {stderr}")
-            }
+            status.code()
         );
     }
 
-    let snapshots: Vec<ResticSnapshot> = serde_json::from_slice(&output.stdout)
-        .context("Failed to parse 'restic snapshots --json' output")?;
-
-    Ok(snapshots
-        .into_iter()
-        .map(|snapshot| {
-            let short_id = snapshot
-                .short_id
-                .or_else(|| snapshot.id.map(|id| id.chars().take(8).collect()))
-                .unwrap_or_else(|| "unknown".to_string());
-            RemoteSnapshotDetails {
-                short_id,
-                time: snapshot.time.unwrap_or_else(|| "unknown".to_string()),
-                hostname: snapshot.hostname.unwrap_or_else(|| "unknown".to_string()),
-                paths: snapshot.paths.unwrap_or_default(),
-            }
-        })
-        .collect())
+    Ok(())
 }
 
 pub fn format_system_time(time: SystemTime) -> String {
@@ -1132,6 +1151,34 @@ mod tests {
     #[test]
     fn capitalizes_operation_name() {
         assert_eq!(capitalize("restore"), "Restore");
+    }
+
+    #[test]
+    fn parses_latest_restic_snapshot_summary_from_formatted_output() {
+        let output = r#"
+repository 12345678 opened (version 2, compression level auto)
+ID        Time                 Host        Tags        Paths
+--------------------------------------------------------------------------------
+abcdef12  2026-06-11 13:30:00  serverbox   clserver    /srv/servers/survival
+--------------------------------------------------------------------------------
+1 snapshots
+"#;
+
+        let summary = parse_latest_restic_snapshot_summary(output)
+            .expect("formatted restic output should contain one snapshot");
+
+        assert_eq!(summary.short_id.as_deref(), Some("abcdef12"));
+        assert_eq!(summary.time.as_deref(), Some("2026-06-11 13:30:00"));
+    }
+
+    #[test]
+    fn returns_none_when_formatted_restic_output_has_no_snapshots() {
+        let output = r#"
+repository 12345678 opened (version 2, compression level auto)
+no snapshots found
+"#;
+
+        assert!(parse_latest_restic_snapshot_summary(output).is_none());
     }
 
     #[test]

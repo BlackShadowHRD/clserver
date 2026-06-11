@@ -148,6 +148,10 @@ enum BackupKind {
 }
 
 fn backup_minecraft_server(server: &MinecraftServer, kind: BackupKind) -> Result<()> {
+    if matches!(kind, BackupKind::Remote) {
+        server.manager.validate_remote_backup_environment()?;
+    }
+
     let was_running = server.manager.screen_session_exists()?;
 
     if was_running {
@@ -170,6 +174,10 @@ fn backup_minecraft_server(server: &MinecraftServer, kind: BackupKind) -> Result
 }
 
 fn backup_generic_server(manager: &ServerManager, kind: BackupKind) -> Result<()> {
+    if matches!(kind, BackupKind::Remote) {
+        manager.validate_remote_backup_environment()?;
+    }
+
     let was_running = manager.screen_session_exists()?;
 
     if was_running {
@@ -354,6 +362,10 @@ struct BackupTask {
 }
 
 fn process_backup_task(task: BackupTask) -> Result<()> {
+    if matches!(task.kind, BackupKind::Remote) {
+        task.server.validate_remote_backup_environment()?;
+    }
+
     let was_running = task.server.screen_session_exists()?;
 
     if was_running {
@@ -413,6 +425,10 @@ fn handle_velocity_servers(config: &Config) -> Result<()> {
             println!("Stopping Velocity server {}", manager.server_id);
             manager.stop_with_stop_command()?;
             ensure_manager_stopped(&manager)?;
+        }
+
+        if server_config.backup.unwrap_or(false) {
+            manager.validate_remote_backup_environment()?;
         }
 
         let backup_result = if server_config.backup.unwrap_or(false) {
@@ -548,6 +564,13 @@ impl MaintenanceServer {
         }
     }
 
+    fn validate_remote_backup_environment(&self) -> Result<()> {
+        match self {
+            Self::Minecraft(server) => server.manager.validate_remote_backup_environment(),
+            Self::Generic(manager) => manager.validate_remote_backup_environment(),
+        }
+    }
+
     fn backup_server(&self, kind: BackupKind) -> Result<()> {
         match (self, kind) {
             (Self::Minecraft(server), BackupKind::Local) => server.manager.backup_server(),
@@ -593,6 +616,10 @@ fn maintenance_server_for_config(config: &Config, server_id: &str) -> Result<Mai
 }
 
 fn process_maintenance_task(task: MaintenanceTask) -> Result<()> {
+    if task.should_backup {
+        task.server.validate_remote_backup_environment()?;
+    }
+
     let server_id = task.server.server_id().to_string();
     let server_name = task.server.server_name().to_string();
     info!(server = %server_name, id = %server_id, "maintenance task started");

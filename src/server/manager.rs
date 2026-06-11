@@ -295,7 +295,12 @@ impl ServerManager {
         Ok(())
     }
 
+    pub fn validate_remote_backup_environment(&self) -> Result<()> {
+        validate_restic_environment(self.restic_env_file.as_deref())
+    }
+
     pub fn remote_backup_server(&self) -> Result<()> {
+        self.validate_remote_backup_environment()?;
         info!(server = %self.config.name, source = %self.server_dir.display(), "starting remote restic backup");
 
         let mut command = Command::new("restic");
@@ -386,6 +391,7 @@ impl ServerManager {
 }
 
 pub fn cleanup_remote_backups(backup: &BackupConfig) -> Result<()> {
+    validate_restic_environment(backup.restic_env_file.as_deref())?;
     info!(keep_daily = 56, "starting remote restic retention cleanup");
 
     let mut command = Command::new("restic");
@@ -411,16 +417,52 @@ pub fn cleanup_remote_backups(backup: &BackupConfig) -> Result<()> {
 }
 
 fn apply_restic_env(command: &mut Command, env_file: Option<&Path>) -> Result<()> {
-    let Some(env_file) = env_file else {
-        return Ok(());
-    };
-
-    let entries = load_env_file(env_file)?;
-    for (key, value) in entries {
+    for (key, value) in restic_env_entries(env_file)? {
         command.env(key, value);
     }
 
     Ok(())
+}
+
+fn validate_restic_environment(env_file: Option<&Path>) -> Result<()> {
+    let entries = restic_env_entries(env_file)?;
+
+    if restic_env_value(&entries, "RESTIC_REPOSITORY").is_none() {
+        bail!(
+            "Restic repository is not configured. Set RESTIC_REPOSITORY{}.",
+            env_file
+                .map(|path| format!(" in '{}'", path.display()))
+                .unwrap_or_else(|| " in the environment".to_string())
+        );
+    }
+
+    if restic_env_value(&entries, "RESTIC_PASSWORD").is_none()
+        && restic_env_value(&entries, "RESTIC_PASSWORD_FILE").is_none()
+        && restic_env_value(&entries, "RESTIC_PASSWORD_COMMAND").is_none()
+    {
+        bail!(
+            "Restic password is not configured. Set RESTIC_PASSWORD, RESTIC_PASSWORD_FILE, or RESTIC_PASSWORD_COMMAND{}.",
+            env_file
+                .map(|path| format!(" in '{}'", path.display()))
+                .unwrap_or_else(|| " in the environment".to_string())
+        );
+    }
+
+    Ok(())
+}
+
+fn restic_env_entries(env_file: Option<&Path>) -> Result<Vec<(String, String)>> {
+    match env_file {
+        Some(env_file) => load_env_file(env_file),
+        None => Ok(std::env::vars().collect()),
+    }
+}
+
+fn restic_env_value(entries: &[(String, String)], key: &str) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find_map(|(entry_key, value)| (entry_key == key).then(|| value.clone()))
 }
 
 fn load_env_file(path: &Path) -> Result<Vec<(String, String)>> {
@@ -725,6 +767,29 @@ mod tests {
         );
         assert_eq!(parse_env_line(path, 3, "# comment")?, None);
         Ok(())
+    }
+
+    #[test]
+    fn validates_restic_environment_entries() {
+        let entries = vec![
+            (
+                "RESTIC_REPOSITORY".to_string(),
+                "s3:s3.example.com/bucket".to_string(),
+            ),
+            (
+                "RESTIC_PASSWORD_FILE".to_string(),
+                "/secure/restic.pwd".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            restic_env_value(&entries, "RESTIC_REPOSITORY").as_deref(),
+            Some("s3:s3.example.com/bucket")
+        );
+        assert_eq!(
+            restic_env_value(&entries, "RESTIC_PASSWORD_FILE").as_deref(),
+            Some("/secure/restic.pwd")
+        );
     }
 
     #[test]

@@ -26,6 +26,13 @@ pub struct RemoteSnapshotSummary {
     pub time: Option<String>,
 }
 
+pub struct RemoteSnapshotDetails {
+    pub short_id: String,
+    pub time: String,
+    pub hostname: String,
+    pub paths: Vec<String>,
+}
+
 pub struct RemoteRestorePlan {
     temp_dir: PathBuf,
     staged_source: PathBuf,
@@ -38,6 +45,8 @@ struct ResticSnapshot {
     time: Option<String>,
     short_id: Option<String>,
     id: Option<String>,
+    hostname: Option<String>,
+    paths: Option<Vec<String>>,
 }
 
 pub struct ServerManager {
@@ -632,26 +641,42 @@ pub fn latest_remote_snapshot(
     backup: &BackupConfig,
     server_id: &str,
 ) -> Result<Option<RemoteSnapshotSummary>> {
+    Ok(remote_snapshots(backup, server_id, 1)?
+        .into_iter()
+        .next()
+        .map(|snapshot| RemoteSnapshotSummary {
+            short_id: Some(snapshot.short_id),
+            time: Some(snapshot.time),
+        }))
+}
+
+pub fn remote_snapshots(
+    backup: &BackupConfig,
+    server_id: &str,
+    latest: usize,
+) -> Result<Vec<RemoteSnapshotDetails>> {
     validate_restic_environment(backup.restic_env_file.as_deref())?;
 
     let mut command = Command::new("restic");
     apply_restic_env(&mut command, backup.restic_env_file.as_deref())?;
-    let output = command
+    command
         .arg("snapshots")
-        .arg("--latest")
-        .arg("1")
         .arg("--tag")
         .arg("clserver")
         .arg("--tag")
-        .arg(format!("server-id:{server_id}"))
+        .arg(format!("server-id:{server_id}"));
+    if latest > 0 {
+        command.arg("--latest").arg(latest.to_string());
+    }
+    let output = command
         .arg("--json")
         .output()
-        .context("Failed to run 'restic snapshots' for backup status")?;
+        .context("Failed to run 'restic snapshots' for backup snapshots")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         bail!(
-            "Restic snapshot status failed for server '{}'. Return code: {:?}{}",
+            "Restic snapshot listing failed for server '{}'. Return code: {:?}{}",
             server_id,
             output.status.code(),
             if stderr.is_empty() {
@@ -665,15 +690,21 @@ pub fn latest_remote_snapshot(
     let snapshots: Vec<ResticSnapshot> = serde_json::from_slice(&output.stdout)
         .context("Failed to parse 'restic snapshots --json' output")?;
 
-    Ok(snapshots.into_iter().next().map(|snapshot| {
-        let short_id = snapshot
-            .short_id
-            .or_else(|| snapshot.id.map(|id| id.chars().take(8).collect()));
-        RemoteSnapshotSummary {
-            short_id,
-            time: snapshot.time,
-        }
-    }))
+    Ok(snapshots
+        .into_iter()
+        .map(|snapshot| {
+            let short_id = snapshot
+                .short_id
+                .or_else(|| snapshot.id.map(|id| id.chars().take(8).collect()))
+                .unwrap_or_else(|| "unknown".to_string());
+            RemoteSnapshotDetails {
+                short_id,
+                time: snapshot.time.unwrap_or_else(|| "unknown".to_string()),
+                hostname: snapshot.hostname.unwrap_or_else(|| "unknown".to_string()),
+                paths: snapshot.paths.unwrap_or_default(),
+            }
+        })
+        .collect())
 }
 
 pub fn format_system_time(time: SystemTime) -> String {

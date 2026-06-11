@@ -493,6 +493,19 @@ clserver backup status
 
 The status command reports whether each server has `backup = true`, whether its local mirror exists, the latest local mirror modification time, whether Restic environment variables are valid, and the latest remote Restic snapshot found for each server.
 
+List remote Restic snapshots for one server:
+
+```sh
+clserver backup snapshots survival
+clserver backup snapshots survival --latest 10
+```
+
+Use the snapshot ID from this output with:
+
+```sh
+clserver restore remote survival --snapshot <snapshot-id>
+```
+
 Run remote restic retention cleanup immediately:
 
 ```sh
@@ -601,7 +614,7 @@ RESTIC_REPOSITORY='s3:s3.eu-west-3.idrivee2.com/clserver'
 RESTIC_PASSWORD_FILE='/home/blackshadow/.config/clserver/secrets/restic.pwd'
 ```
 
-`clserver backup remote` runs restic with tags for `clserver`, `server-id:<id>`, and `server-name:<name>`. `clserver backup status` uses those tags to query the latest snapshot per server with `restic snapshots --latest 1 --json`. `clserver restore remote` restores a selected snapshot into `<backup.localDir>/.restic-restore/<server-id>-<timestamp>` before rsyncing the requested restore scope into the live server directory. Remote cleanup uses:
+`clserver backup remote` runs restic with tags for `clserver`, `server-id:<id>`, and `server-name:<name>`. `clserver backup status` uses those tags to query the latest snapshot per server with `restic snapshots --latest 1 --json`; `clserver backup snapshots <server>` lists snapshots for one server using the same tags. `clserver restore remote` restores a selected snapshot into `<backup.localDir>/.restic-restore/<server-id>-<timestamp>` before rsyncing the requested restore scope into the live server directory. Remote cleanup uses:
 
 ```sh
 restic forget --keep-daily 56 --prune

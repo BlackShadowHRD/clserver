@@ -86,12 +86,25 @@ enum BackupCommands {
     /// Show local and remote backup status
     Status,
 
+    /// List remote restic snapshots for one server
+    Snapshots(BackupSnapshotsArgs),
+
     /// Run backup retention cleanup
     Cleanup {
         /// Preview snapshots that would be forgotten without pruning or deleting anything
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Args, Debug)]
+struct BackupSnapshotsArgs {
+    /// Server ID to list snapshots for
+    server: String,
+
+    /// Limit output to the latest N snapshots
+    #[arg(long, default_value_t = 10)]
+    latest: usize,
 }
 
 #[derive(Args, Debug)]
@@ -164,6 +177,10 @@ pub enum Action {
         dry_run: bool,
     },
     BackupStatus,
+    BackupSnapshots {
+        server: String,
+        latest: usize,
+    },
     RestoreLocal {
         dry_run: bool,
     },
@@ -226,6 +243,13 @@ where
             BackupCommands::Local(selection) => backup_action(ActionKind::Local, selection),
             BackupCommands::Remote(selection) => backup_action(ActionKind::Remote, selection),
             BackupCommands::Status => (Action::BackupStatus, None),
+            BackupCommands::Snapshots(args) => (
+                Action::BackupSnapshots {
+                    server: args.server.clone(),
+                    latest: args.latest,
+                },
+                Some(args.server),
+            ),
             BackupCommands::Cleanup { dry_run } => (Action::BackupCleanup { dry_run }, None),
         },
         Commands::Restore(args) => restore_action(args)?,
@@ -576,6 +600,43 @@ mod tests {
 
         assert!(matches!(request.action, Action::BackupStatus));
         assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_backup_snapshots_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "backup", "snapshots", "survival"])?;
+
+        assert!(matches!(
+            request.action,
+            Action::BackupSnapshots {
+                ref server,
+                latest: 10,
+            } if server == "survival"
+        ));
+        assert_eq!(request.server.as_deref(), Some("survival"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_backup_snapshots_latest_subcommand() -> Result<()> {
+        let request = parse_request_from([
+            "clserver",
+            "backup",
+            "snapshots",
+            "survival",
+            "--latest",
+            "25",
+        ])?;
+
+        assert!(matches!(
+            request.action,
+            Action::BackupSnapshots {
+                ref server,
+                latest: 25,
+            } if server == "survival"
+        ));
+        assert_eq!(request.server.as_deref(), Some("survival"));
         Ok(())
     }
 

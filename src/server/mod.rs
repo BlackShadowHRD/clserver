@@ -13,7 +13,7 @@ use tracing::{info, warn};
 use generic::GenericServer;
 use manager::{
     DEFAULT_STOP_POLL_INTERVAL, DEFAULT_STOP_TIMEOUT, ServerManager, cleanup_remote_backups,
-    format_system_time, latest_remote_snapshot, restic_environment_status,
+    format_system_time, latest_remote_snapshot, remote_snapshots, restic_environment_status,
 };
 use minecraft::MinecraftServer;
 
@@ -38,6 +38,9 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
             return cleanup_remote_backups(&config.backup, *dry_run);
         }
         Action::BackupStatus => return backup_status(&config),
+        Action::BackupSnapshots { server, latest } => {
+            return backup_snapshots(&config, server, *latest);
+        }
         _ => {}
     }
 
@@ -114,6 +117,7 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
         Action::Status => server.manager.status_server(),
         Action::BackupCleanup { .. }
         | Action::BackupStatus
+        | Action::BackupSnapshots { .. }
         | Action::Maintenance
         | Action::List
         | Action::ValidateConfig { .. }
@@ -151,6 +155,7 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
         Action::Status => server.manager.status_server(),
         Action::BackupCleanup { .. }
         | Action::BackupStatus
+        | Action::BackupSnapshots { .. }
         | Action::Maintenance
         | Action::List
         | Action::ValidateConfig { .. }
@@ -458,6 +463,80 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
 fn log_maintenance_phase(phase: &str) {
     info!(phase, "daily maintenance phase started");
     println!("== {phase} ==");
+}
+
+fn backup_snapshots(config: &Config, server_id: &str, latest: usize) -> Result<()> {
+    if !config.servers.contains_key(server_id) {
+        bail!("Server '{}' not found in configuration file.", server_id);
+    }
+
+    let snapshots = remote_snapshots(&config.backup, server_id, latest)?;
+    println!("Remote snapshots for {server_id}");
+    if latest > 0 {
+        println!("Latest: {latest}");
+    }
+
+    if snapshots.is_empty() {
+        println!("No remote snapshots found.");
+        return Ok(());
+    }
+
+    let rows = snapshots
+        .into_iter()
+        .map(|snapshot| SnapshotRow {
+            id: snapshot.short_id,
+            time: snapshot.time,
+            host: snapshot.hostname,
+            paths: if snapshot.paths.is_empty() {
+                "none".to_string()
+            } else {
+                snapshot.paths.join(", ")
+            },
+        })
+        .collect::<Vec<_>>();
+
+    print_snapshot_rows(&rows);
+    Ok(())
+}
+
+struct SnapshotRow {
+    id: String,
+    time: String,
+    host: String,
+    paths: String,
+}
+
+fn print_snapshot_rows(rows: &[SnapshotRow]) {
+    let id_width = list_column_width("ID", rows.iter().map(|row| row.id.as_str()));
+    let time_width = list_column_width("TIME", rows.iter().map(|row| row.time.as_str()));
+    let host_width = list_column_width("HOST", rows.iter().map(|row| row.host.as_str()));
+
+    println!(
+        "{}",
+        format_snapshot_row(
+            "ID", "TIME", "HOST", "PATHS", id_width, time_width, host_width
+        )
+    );
+    for row in rows {
+        println!(
+            "{}",
+            format_snapshot_row(
+                &row.id, &row.time, &row.host, &row.paths, id_width, time_width, host_width,
+            )
+        );
+    }
+}
+
+fn format_snapshot_row(
+    id: &str,
+    time: &str,
+    host: &str,
+    paths: &str,
+    id_width: usize,
+    time_width: usize,
+    host_width: usize,
+) -> String {
+    format!("{id:<id_width$}  {time:<time_width$}  {host:<host_width$}  {paths}")
 }
 
 fn backup_status(config: &Config) -> Result<()> {
@@ -1174,6 +1253,24 @@ mod tests {
     fn list_column_width_uses_longest_value_or_header() {
         assert_eq!(list_column_width("ID", ["CLS4", "proxy"].into_iter()), 5);
         assert_eq!(list_column_width("SERVER", ["one", "two"].into_iter()), 6);
+    }
+
+    #[test]
+    fn formats_snapshot_rows_with_dynamic_widths() {
+        let row = format_snapshot_row(
+            "abc12345",
+            "2026-06-11T12:00:00Z",
+            "serverbox",
+            "/srv/servers/survival",
+            "abc12345".len(),
+            "2026-06-11T12:00:00Z".len(),
+            "serverbox".len(),
+        );
+
+        assert_eq!(
+            row,
+            "abc12345  2026-06-11T12:00:00Z  serverbox  /srv/servers/survival"
+        );
     }
 
     #[test]

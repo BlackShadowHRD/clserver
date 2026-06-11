@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -54,6 +55,13 @@ enum Commands {
     /// List all configured servers and whether their screen sessions are running
     List,
 
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+
     /// Validate the configuration file and exit
     ValidateConfig {
         /// Offer to update mismatched Minecraft RCON passwords in clserver.toml
@@ -103,6 +111,7 @@ pub enum Action {
     Status,
     List,
     ValidateConfig { fix: bool },
+    Completions { shell: Shell },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +162,7 @@ where
         Commands::Attach { server } => (Action::Attach, Some(server)),
         Commands::Status { server } => (Action::Status, Some(server)),
         Commands::List => (Action::List, None),
+        Commands::Completions { shell } => (Action::Completions { shell }, None),
         Commands::ValidateConfig { fix } => (Action::ValidateConfig { fix }, None),
     };
 
@@ -163,6 +173,11 @@ where
     };
 
     Ok(request)
+}
+
+pub fn generate_completions(shell: Shell) {
+    let mut command = Cli::command();
+    generate(shell, &mut command, "clserver", &mut std::io::stdout());
 }
 
 enum ActionKind {
@@ -376,6 +391,29 @@ mod tests {
             .expect_err("backup local requires server or --all");
 
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn parses_completions_subcommand() -> Result<()> {
+        let request = parse_request_from(["clserver", "completions", "bash"])?;
+
+        assert!(matches!(
+            request.action,
+            Action::Completions { shell: Shell::Bash }
+        ));
+        assert_eq!(request.server, None);
+        Ok(())
+    }
+
+    #[test]
+    fn generates_bash_completions() {
+        let mut command = Cli::command();
+        let mut output = Vec::new();
+        generate(Shell::Bash, &mut command, "clserver", &mut output);
+        let output = String::from_utf8(output).expect("bash completion should be utf8");
+
+        assert!(output.contains("completions"));
+        assert!(output.contains("backup"));
     }
 
     #[test]

@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Optional `[backup].resticEnvFile` setting so `clserver` can load restic environment variables itself.
 - `validate-config` now checks restic repository/password settings when backups are enabled.
 - `--version` / `-V` CLI flag powered by the Cargo package version.
+- `completions <shell>` command for generating shell completion scripts for bash, zsh, fish, PowerShell, and Elvish.
 - `restore <server>` command for restoring either the `world` directory or the full server backup with confirmation.
 - Per-server `restore` setting with supported values `"world"` and `"all"`, defaulting to `"world"`.
 

@@ -108,7 +108,8 @@ fn dispatch_minecraft(server: &MinecraftServer, action: Action) -> Result<()> {
         | Action::BackupStatus
         | Action::Maintenance
         | Action::List
-        | Action::ValidateConfig { .. } => no_server_action_unreachable(),
+        | Action::ValidateConfig { .. }
+        | Action::Completions { .. } => no_server_action_unreachable(),
     }
 }
 
@@ -139,7 +140,8 @@ fn dispatch_generic(server: &GenericServer, action: Action) -> Result<()> {
         | Action::BackupStatus
         | Action::Maintenance
         | Action::List
-        | Action::ValidateConfig { .. } => no_server_action_unreachable(),
+        | Action::ValidateConfig { .. }
+        | Action::Completions { .. } => no_server_action_unreachable(),
     }
 }
 

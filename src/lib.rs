@@ -9,6 +9,12 @@ use anyhow::Result;
 
 pub fn run() -> Result<()> {
     let request = cli::parse_request()?;
+
+    if let cli::Action::Completions { shell } = request.action {
+        cli::generate_completions(shell);
+        return Ok(());
+    }
+
     let _log_guard = logging::init("clserver", request.verbose)?;
 
     if request.verbose {

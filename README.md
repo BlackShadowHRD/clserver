@@ -101,6 +101,21 @@ Confirm it is available:
 clserver --help
 ```
 
+Optional: install shell completions. For system-wide bash completions:
+
+```sh
+clserver completions bash | sudo tee /etc/bash_completion.d/clserver >/dev/null
+```
+
+For per-user bash completions:
+
+```sh
+mkdir -p ~/.local/share/bash-completion/completions
+clserver completions bash > ~/.local/share/bash-completion/completions/clserver
+```
+
+Open a new shell after installing completions. Regenerate the completion file after updating `clserver` if commands or flags changed.
+
 ### Deploy configuration
 
 Create the config directory for the user that will run `clServer`:
@@ -349,6 +364,18 @@ Display the installed version:
 clserver --version
 clserver -V
 ```
+
+Generate shell completions:
+
+```sh
+clserver completions bash
+clserver completions zsh
+clserver completions fish
+clserver completions powershell
+clserver completions elvish
+```
+
+For bash, save the output to a location loaded by bash completion, such as `/etc/bash_completion.d/clserver` or `~/.local/share/bash-completion/completions/clserver`.
 
 Enable verbose logging for debugging details:
 

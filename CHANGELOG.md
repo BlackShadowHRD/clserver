@@ -52,6 +52,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `backup local <server>` now runs `rsync -av --delete` instead of the old placeholder backup.
 - `backup local <server>` and `backup remote <server>` stop a running server before backup and restart it afterward.
 - Daily maintenance now runs both local mirror and remote restic backups for servers with `backup = true`.
+- Daily maintenance logging now includes clearer phase, decision, skip, backup, stop, and start messages.
 
 ### Fixed
 

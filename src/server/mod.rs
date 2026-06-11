@@ -251,10 +251,31 @@ fn restore_generic_server(manager: &ServerManager) -> Result<()> {
 }
 
 fn run_maintenance(config: &mut Config) -> Result<()> {
-    info!("daily maintenance started");
-    println!("Daily maintenance started");
+    let total_servers = config.servers.len();
+    let backup_enabled_servers = config
+        .servers
+        .values()
+        .filter(|server| server.backup.unwrap_or(false))
+        .count();
+    let enabled_servers = config
+        .servers
+        .values()
+        .filter(|server| server.enabled.unwrap_or(false))
+        .count();
 
+    info!(
+        total_servers,
+        backup_enabled_servers, enabled_servers, "daily maintenance started"
+    );
+    println!("Daily maintenance started");
+    println!(
+        "Configured servers: {total_servers}; backup enabled: {backup_enabled_servers}; enabled for restart: {enabled_servers}"
+    );
+
+    log_maintenance_phase("reconcile minecraft rcon passwords");
     reconcile_running_minecraft_servers(config)?;
+
+    log_maintenance_phase("velocity pre-backend handling");
     handle_velocity_servers(config)?;
 
     let should_run_cleanup = config
@@ -263,7 +284,21 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
         .any(|server| server.backup.unwrap_or(false));
     let tasks = build_maintenance_tasks(config)?;
     let task_count = tasks.len();
-    info!(task_count, "starting parallel server maintenance tasks");
+    let running_task_count = tasks.iter().filter(|task| task.was_running).count();
+    let restart_task_count = tasks.iter().filter(|task| task.should_start).count();
+    let backup_task_count = tasks.iter().filter(|task| task.should_backup).count();
+    info!(
+        task_count,
+        running_task_count,
+        restart_task_count,
+        backup_task_count,
+        "starting parallel backend maintenance tasks"
+    );
+    println!(
+        "Backend tasks: {task_count}; running: {running_task_count}; backup: {backup_task_count}; restart: {restart_task_count}"
+    );
+
+    log_maintenance_phase("parallel backend processing");
 
     let handles: Vec<_> = tasks
         .into_iter()
@@ -289,8 +324,14 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
 
     if failures.is_empty() {
         if is_monday() && should_run_cleanup {
+            log_maintenance_phase("monday remote backup cleanup");
             cleanup_remote_backups(&config.backup)
                 .context("Daily maintenance backups completed, but remote cleanup failed")?;
+        } else {
+            info!(
+                is_monday = is_monday(),
+                should_run_cleanup, "skipping remote backup cleanup"
+            );
         }
 
         info!(task_count, "daily maintenance finished successfully");
@@ -302,6 +343,11 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
         }
         bail!("Daily maintenance failed:\n- {}", failures.join("\n- "));
     }
+}
+
+fn log_maintenance_phase(phase: &str) {
+    info!(phase, "daily maintenance phase started");
+    println!("== {phase} ==");
 }
 
 fn backup_all_servers(config: &mut Config, kind: BackupKind) -> Result<()> {
@@ -411,6 +457,10 @@ fn handle_velocity_servers(config: &Config) -> Result<()> {
         .collect();
     velocity_ids.sort();
 
+    if velocity_ids.is_empty() {
+        info!("no velocity servers configured for pre-backend handling");
+    }
+
     for server_id in velocity_ids {
         let server_config = config
             .servers
@@ -419,6 +469,15 @@ fn handle_velocity_servers(config: &Config) -> Result<()> {
         let manager = manager_for_server(config, &server_id)?;
         let was_running = manager.screen_session_exists()?;
         let should_start = server_config.enabled.unwrap_or(false);
+        let should_backup = server_config.backup.unwrap_or(false);
+        info!(
+            id = %manager.server_id,
+            server = %manager.config.name,
+            was_running,
+            should_start,
+            should_backup,
+            "velocity maintenance decision"
+        );
 
         if was_running {
             info!(server = %manager.config.name, id = %manager.server_id, "stopping velocity server before backend maintenance");
@@ -427,15 +486,19 @@ fn handle_velocity_servers(config: &Config) -> Result<()> {
             ensure_manager_stopped(&manager)?;
         }
 
-        if server_config.backup.unwrap_or(false) {
+        if should_backup {
+            info!(id = %manager.server_id, server = %manager.config.name, "validating restic environment for velocity backup");
             manager.validate_remote_backup_environment()?;
         }
 
-        let backup_result = if server_config.backup.unwrap_or(false) {
+        let backup_result = if should_backup {
+            info!(id = %manager.server_id, server = %manager.config.name, "starting velocity local and remote backups");
+            println!("Backing up Velocity server {}", manager.server_id);
             manager
                 .backup_server()
                 .and_then(|()| manager.remote_backup_server())
         } else {
+            info!(id = %manager.server_id, server = %manager.config.name, "velocity backup skipped because backup is disabled");
             Ok(())
         };
 
@@ -478,6 +541,15 @@ fn build_maintenance_tasks(config: &Config) -> Result<Vec<MaintenanceTask>> {
         let was_running = server.screen_session_exists()?;
         let should_start = server_config.enabled.unwrap_or(false);
         let should_backup = server_config.backup.unwrap_or(false);
+        info!(
+            id = %server.server_id(),
+            server = %server.server_name(),
+            server_type = %server_config.server_type,
+            was_running,
+            should_start,
+            should_backup,
+            "backend maintenance decision"
+        );
 
         if was_running || should_start || should_backup {
             tasks.push(MaintenanceTask {
@@ -616,27 +688,46 @@ fn maintenance_server_for_config(config: &Config, server_id: &str) -> Result<Mai
 }
 
 fn process_maintenance_task(task: MaintenanceTask) -> Result<()> {
+    let server_id = task.server.server_id().to_string();
+    let server_name = task.server.server_name().to_string();
+
     if task.should_backup {
+        info!(id = %server_id, server = %server_name, "validating restic environment for backend backup");
         task.server.validate_remote_backup_environment()?;
     }
 
-    let server_id = task.server.server_id().to_string();
-    let server_name = task.server.server_name().to_string();
-    info!(server = %server_name, id = %server_id, "maintenance task started");
+    info!(
+        server = %server_name,
+        id = %server_id,
+        was_running = task.was_running,
+        should_backup = task.should_backup,
+        should_start = task.should_start,
+        "maintenance task started"
+    );
     println!("Maintaining {server_id}");
 
     if task.was_running {
+        info!(id = %server_id, server = %server_name, "stopping backend server for maintenance");
         task.server.stop_for_maintenance()?;
         ensure_stopped(&task.server)?;
+    } else {
+        info!(id = %server_id, server = %server_name, "backend stop skipped because server was not running");
     }
 
     if task.should_backup {
+        info!(id = %server_id, server = %server_name, "starting backend local mirror backup");
         task.server.backup_server(BackupKind::Local)?;
+        info!(id = %server_id, server = %server_name, "starting backend remote restic backup");
         task.server.backup_server(BackupKind::Remote)?;
+    } else {
+        info!(id = %server_id, server = %server_name, "backend backup skipped because backup is disabled");
     }
 
     if task.should_start {
+        info!(id = %server_id, server = %server_name, "starting backend server after maintenance");
         task.server.start_server()?;
+    } else {
+        info!(id = %server_id, server = %server_name, "backend start skipped because enabled is false");
     }
 
     info!(server = %server_name, id = %server_id, "maintenance task finished");

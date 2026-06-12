@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 pub mod logging;
+mod notifications;
 mod paths;
 mod rcon;
 mod server;

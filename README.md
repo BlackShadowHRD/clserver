@@ -249,6 +249,13 @@ logDir = "/var/log/clserver"
 localDir = "/srv/backups/clserver"
 resticEnvFile = "/home/blackshadow/.config/clserver/secrets/restic.env"
 
+[notifications]
+enabled = true
+maintenanceSummary = true
+
+[notifications.discord]
+webhookEnvFile = "/home/blackshadow/.config/clserver/secrets/discord.env"
+
 [java_environments]
 default = "/usr/bin/java"
 java17 = "/usr/lib/jvm/java-17-openjdk/bin/java"
@@ -572,6 +579,21 @@ Run daily maintenance across the configured fleet:
 
 ```sh
 clserver maintenance
+```
+
+If Discord notifications are enabled, `maintenance` sends a summary message after success or failure. Notification failures are logged as warnings and do not change the maintenance command result.
+
+Discord maintenance notifications use an env file containing the webhook URL:
+
+```sh
+CLSERVER_DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
+```
+
+Recommended permissions:
+
+```sh
+chmod 700 ~/.config/clserver/secrets
+chmod 600 ~/.config/clserver/secrets/discord.env
 ```
 
 Maintenance performs this workflow:

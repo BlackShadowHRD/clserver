@@ -13,7 +13,7 @@ use toml_edit::{DocumentMut, Item, Value};
 /// and one or more configured servers under `[servers.<name>]` tables. Serde
 /// defaults are used here so that validation can report friendly, aggregated
 /// errors instead of failing immediately on missing sections.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
     /// Global filesystem locations shared by all configured servers.
     #[serde(default)]
@@ -38,6 +38,10 @@ pub struct Config {
     /// Backup tool settings.
     #[serde(default)]
     pub backup: BackupConfig,
+
+    /// Optional notification settings.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 /// Global filesystem settings shared by every server.
@@ -65,6 +69,29 @@ pub struct BackupConfig {
     /// Shell-style env file loaded for restic commands.
     #[serde(rename = "resticEnvFile")]
     pub restic_env_file: Option<PathBuf>,
+}
+
+/// Notification settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NotificationsConfig {
+    /// Master enable switch for notifications.
+    pub enabled: Option<bool>,
+
+    /// Whether to send maintenance success/failure summaries.
+    #[serde(rename = "maintenanceSummary")]
+    pub maintenance_summary: Option<bool>,
+
+    /// Discord webhook notification settings.
+    #[serde(default)]
+    pub discord: DiscordNotificationConfig,
+}
+
+/// Discord notification settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DiscordNotificationConfig {
+    /// Env file containing CLSERVER_DISCORD_WEBHOOK_URL.
+    #[serde(rename = "webhookEnvFile")]
+    pub webhook_env_file: Option<PathBuf>,
 }
 
 /// Supported server runtime categories.
@@ -246,6 +273,32 @@ pub fn validate_config(config: &Config) -> Result<()> {
         errors.push("backup.resticEnvFile cannot be empty when configured".to_string());
     }
 
+    if config
+        .notifications
+        .discord
+        .webhook_env_file
+        .as_ref()
+        .is_some_and(|path| is_blank_path(path))
+    {
+        errors.push(
+            "notifications.discord.webhookEnvFile cannot be empty when configured".to_string(),
+        );
+    }
+
+    if notifications_enabled(&config.notifications)
+        && config
+            .notifications
+            .discord
+            .webhook_env_file
+            .as_ref()
+            .is_none_or(|path| is_blank_path(path))
+    {
+        errors.push(
+            "notifications.discord.webhookEnvFile is required when notifications are enabled"
+                .to_string(),
+        );
+    }
+
     if config.servers.is_empty() {
         errors.push("at least one server must be configured under [servers]".to_string());
     }
@@ -310,6 +363,10 @@ fn has_backup_enabled_servers(config: &Config) -> bool {
         .servers
         .values()
         .any(|server| server.backup.unwrap_or(false))
+}
+
+fn notifications_enabled(notifications: &NotificationsConfig) -> bool {
+    notifications.enabled.unwrap_or(false) && notifications.maintenance_summary.unwrap_or(true)
 }
 
 fn validate_restic_environment_config(backup: &BackupConfig, errors: &mut Vec<String>) {

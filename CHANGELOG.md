@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `restore remote <server>` command for staging a Restic snapshot under `<backup.localDir>/.restic-restore/<server-id>-<timestamp>` and restoring either `world` or the full server with rsync.
 - `--dry-run` support for `restore <server>` and `backup cleanup`.
 - Per-server `restore` setting with supported values `"world"` and `"all"`, defaulting to `"world"`.
+- Optional Discord webhook maintenance notifications loaded from `notifications.discord.webhookEnvFile`.
 
 ### Changed
 

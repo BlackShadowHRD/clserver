@@ -6,8 +6,10 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::cli::{Action, BackupTarget, Request, RestoreModeArg, StopType};
 use crate::config::{self, Config, RestoreMode, ServerType};
+use crate::notifications;
 use chrono::{Datelike, Local, Weekday};
 use std::thread;
+use std::time::Instant;
 use tracing::{info, warn};
 
 use generic::GenericServer;
@@ -27,7 +29,7 @@ pub fn dispatch_request(request: Request, mut config: Config) -> Result<()> {
     }
 
     match &request.action {
-        Action::Maintenance => return run_maintenance(&mut config),
+        Action::Maintenance => return run_maintenance_with_notification(&mut config),
         Action::BackupLocal {
             target: BackupTarget::All,
         } => return backup_all_servers(&mut config, BackupKind::Local),
@@ -363,6 +365,18 @@ fn restore_mode_from_arg(mode: RestoreModeArg) -> RestoreMode {
         RestoreModeArg::World => RestoreMode::World,
         RestoreModeArg::All => RestoreMode::All,
     }
+}
+
+fn run_maintenance_with_notification(config: &mut Config) -> Result<()> {
+    let started = Instant::now();
+    let result = run_maintenance(config);
+    let duration = started.elapsed();
+
+    if let Err(err) = notifications::send_maintenance_summary(config, &result, duration) {
+        warn!(error = %format!("{err:#}"), "failed to send maintenance notification");
+    }
+
+    result
 }
 
 fn run_maintenance(config: &mut Config) -> Result<()> {

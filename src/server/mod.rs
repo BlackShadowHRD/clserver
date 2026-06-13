@@ -372,8 +372,19 @@ fn run_maintenance_with_notification(config: &mut Config) -> Result<()> {
     let result = run_maintenance(config);
     let duration = started.elapsed();
 
-    if let Err(err) = notifications::send_maintenance_summary(config, &result, duration) {
-        warn!(error = %format!("{err:#}"), "failed to send maintenance notification");
+    match notifications::send_maintenance_summary(config, &result, duration) {
+        Ok(true) => {
+            info!("sent maintenance notification");
+            println!("Maintenance notification sent");
+        }
+        Ok(false) => {
+            info!("maintenance notification disabled");
+            println!("Maintenance notification skipped: notifications are disabled");
+        }
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "failed to send maintenance notification");
+            eprintln!("Failed to send maintenance notification: {err:#}");
+        }
     }
 
     result

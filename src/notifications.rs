@@ -14,9 +14,9 @@ pub fn send_maintenance_summary(
     config: &Config,
     result: &Result<()>,
     duration: Duration,
-) -> Result<()> {
+) -> Result<bool> {
     if !notifications_enabled(config) {
-        return Ok(());
+        return Ok(false);
     }
 
     let Some(env_file) = config.notifications.discord.webhook_env_file.as_deref() else {
@@ -25,7 +25,8 @@ pub fn send_maintenance_summary(
 
     let webhook_url = discord_webhook_url(env_file)?;
     let content = truncate_discord_content(&maintenance_message(config, result, duration));
-    send_discord_webhook(&webhook_url, &content)
+    send_discord_webhook(&webhook_url, &content)?;
+    Ok(true)
 }
 
 fn notifications_enabled(config: &Config) -> bool {
@@ -215,6 +216,31 @@ mod tests {
 
         assert!(message.contains("clserver maintenance completed"));
         assert!(message.contains("Duration: 1m 15s"));
+    }
+
+    #[test]
+    fn reports_summary_skipped_when_notifications_are_disabled() -> Result<()> {
+        let config = Config::default();
+
+        let sent = send_maintenance_summary(&config, &Ok(()), Duration::from_secs(1))?;
+
+        assert!(!sent);
+        Ok(())
+    }
+
+    #[test]
+    fn reports_enabled_summary_configuration_errors() {
+        let mut config = Config::default();
+        config.notifications.enabled = Some(true);
+
+        let error = send_maintenance_summary(&config, &Ok(()), Duration::from_secs(1))
+            .expect_err("enabled notifications without a webhook env file should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("notifications.discord.webhookEnvFile is required")
+        );
     }
 
     #[test]

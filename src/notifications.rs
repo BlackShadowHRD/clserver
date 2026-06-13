@@ -73,6 +73,10 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+pub(crate) fn validate_discord_webhook_env_file(env_file: &Path) -> Result<()> {
+    discord_webhook_url(env_file).map(|_| ())
+}
+
 fn discord_webhook_url(env_file: &Path) -> Result<String> {
     let entries = load_env_file(env_file)?;
     entries

@@ -42,6 +42,10 @@ pub struct Config {
     /// Optional notification settings.
     #[serde(default)]
     pub notifications: NotificationsConfig,
+
+    /// Whether the top-level `[notifications]` table was present in the TOML file.
+    #[serde(skip)]
+    pub notifications_section_present: bool,
 }
 
 /// Global filesystem settings shared by every server.
@@ -234,7 +238,11 @@ pub fn load_config(config_file: Option<&Path>) -> Result<Config> {
         )
     })?;
 
-    let config: Config = toml_edit::de::from_str(&text).context("Invalid TOML file")?;
+    let document: DocumentMut = text.parse().context("Invalid TOML file")?;
+    let notifications_section_present = document.contains_key("notifications");
+
+    let mut config: Config = toml_edit::de::from_str(&text).context("Invalid TOML file")?;
+    config.notifications_section_present = notifications_section_present;
     validate_config(&config)?;
     Ok(config)
 }
@@ -285,18 +293,19 @@ pub fn validate_config(config: &Config) -> Result<()> {
         );
     }
 
-    if notifications_enabled(&config.notifications)
-        && config
-            .notifications
-            .discord
-            .webhook_env_file
-            .as_ref()
-            .is_none_or(|path| is_blank_path(path))
-    {
-        errors.push(
-            "notifications.discord.webhookEnvFile is required when notifications are enabled"
-                .to_string(),
-        );
+    if notifications_enabled(&config.notifications) {
+        match config.notifications.discord.webhook_env_file.as_ref() {
+            Some(env_file) if !is_blank_path(env_file) => {
+                if let Err(err) = crate::notifications::validate_discord_webhook_env_file(env_file)
+                {
+                    errors.push(err.to_string());
+                }
+            }
+            _ => errors.push(
+                "notifications.discord.webhookEnvFile is required when notifications are enabled"
+                    .to_string(),
+            ),
+        }
     }
 
     if config.servers.is_empty() {
@@ -356,6 +365,12 @@ pub fn restic_environment_check_success_message(config: &Config) -> Option<Strin
                 .to_string()
         }
     })
+}
+
+pub fn missing_notifications_section_warning(config: &Config) -> Option<&'static str> {
+    (!config.notifications_section_present).then_some(
+        "Warning: [notifications] section is missing; maintenance Discord notifications are disabled.",
+    )
 }
 
 fn has_backup_enabled_servers(config: &Config) -> bool {
@@ -809,6 +824,9 @@ fn print_validate_config_success(config: &Config) {
     if let Some(message) = restic_environment_check_success_message(config) {
         println!("{message}");
     }
+    if let Some(warning) = missing_notifications_section_warning(config) {
+        println!("{warning}");
+    }
     println!("Configuration is valid.");
 }
 
@@ -1014,6 +1032,37 @@ mod tests {
         path
     }
 
+    fn write_test_discord_env(name: &str, text: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "clserver-{name}-{}-discord.env",
+            std::process::id()
+        ));
+        fs::write(&path, text).expect("test discord env file should be written");
+        path
+    }
+
+    fn minimal_config_with_notifications(notifications: &str) -> String {
+        format!(
+            r#"
+            [global]
+            serverDir = "/srv/servers"
+            logDir = "/var/log/clserver"
+
+            {notifications}
+
+            [java_environments]
+            default = "/usr/bin/java"
+
+            [servers.survival]
+            name = "survival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25575
+            rconPassword = "secret"
+            "#
+        )
+    }
+
     #[test]
     fn validates_complete_minecraft_config() {
         let config = parse_config(
@@ -1143,6 +1192,60 @@ mod tests {
         validate_config(&config).expect("config should be valid");
 
         assert!(restic_environment_check_success_message(&config).is_none());
+    }
+
+    #[test]
+    fn validates_enabled_notifications_discord_env_file() {
+        let discord_env = write_test_discord_env(
+            "valid-discord-env",
+            "CLSERVER_DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/test'",
+        );
+        let config = parse_config(&minimal_config_with_notifications(&format!(
+            r#"
+            [notifications]
+            enabled = true
+            maintenanceSummary = true
+
+            [notifications.discord]
+            webhookEnvFile = "{}"
+            "#,
+            discord_env.display()
+        )));
+
+        validate_config(&config).expect("discord notification config should be valid");
+    }
+
+    #[test]
+    fn rejects_enabled_notifications_discord_env_file_without_webhook_url() {
+        let discord_env = write_test_discord_env("missing-webhook-url", "OTHER=value");
+        let config = parse_config(&minimal_config_with_notifications(&format!(
+            r#"
+            [notifications]
+            enabled = true
+            maintenanceSummary = true
+
+            [notifications.discord]
+            webhookEnvFile = "{}"
+            "#,
+            discord_env.display()
+        )));
+
+        let error = validate_config(&config).expect_err("missing webhook url should fail");
+        assert!(error.to_string().contains("CLSERVER_DISCORD_WEBHOOK_URL"));
+    }
+
+    #[test]
+    fn allows_enabled_notifications_with_maintenance_summary_disabled_without_webhook_env_file() {
+        let config = parse_config(&minimal_config_with_notifications(
+            r#"
+            [notifications]
+            enabled = true
+            maintenanceSummary = false
+            "#,
+        ));
+
+        validate_config(&config)
+            .expect("maintenanceSummary = false should not require discord webhook config");
     }
 
     #[test]

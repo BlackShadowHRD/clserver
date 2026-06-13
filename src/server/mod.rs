@@ -378,8 +378,12 @@ fn run_maintenance_with_notification(config: &mut Config) -> Result<()> {
             println!("Maintenance notification sent");
         }
         Ok(false) => {
-            info!("maintenance notification disabled");
-            println!("Maintenance notification skipped: notifications are disabled");
+            if let Some(warning) = config::missing_notifications_section_warning(config) {
+                warn!("{warning}");
+                eprintln!("{warning}");
+            } else {
+                info!("maintenance notification disabled");
+            }
         }
         Err(err) => {
             warn!(error = %format!("{err:#}"), "failed to send maintenance notification");

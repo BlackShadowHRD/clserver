@@ -66,6 +66,9 @@ pub struct GlobalConfig {
 /// Backup tool settings.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct BackupConfig {
+    /// Remote backup provider. Defaults to Restic when omitted.
+    pub provider: Option<RemoteBackupProviderConfig>,
+
     /// Base directory for local mirror backups.
     #[serde(rename = "localDir")]
     pub local_dir: Option<PathBuf>,
@@ -73,6 +76,19 @@ pub struct BackupConfig {
     /// Shell-style env file loaded for restic commands.
     #[serde(rename = "resticEnvFile")]
     pub restic_env_file: Option<PathBuf>,
+
+    /// Shell-style env file loaded for kopia commands.
+    #[serde(rename = "kopiaEnvFile")]
+    pub kopia_env_file: Option<PathBuf>,
+}
+
+/// Supported remote backup providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteBackupProviderConfig {
+    #[default]
+    Restic,
+    Kopia,
 }
 
 /// Notification settings.
@@ -282,6 +298,15 @@ pub fn validate_config(config: &Config) -> Result<()> {
     }
 
     if config
+        .backup
+        .kopia_env_file
+        .as_ref()
+        .is_some_and(|path| is_blank_path(path))
+    {
+        errors.push("backup.kopiaEnvFile cannot be empty when configured".to_string());
+    }
+
+    if config
         .notifications
         .discord
         .webhook_env_file
@@ -343,7 +368,21 @@ pub fn validate_config(config: &Config) -> Result<()> {
     }
 
     if any_backup_enabled {
-        validate_restic_environment_config(&config.backup, &mut errors);
+        match config.backup.provider.unwrap_or_default() {
+            RemoteBackupProviderConfig::Restic => {
+                validate_restic_environment_config(&config.backup, &mut errors);
+            }
+            RemoteBackupProviderConfig::Kopia => {
+                // Kopia repository connectivity is validated by running `kopia repository status`
+                // at operation time. Config validation only checks that a configured env file path
+                // is syntactically usable and parseable.
+                if let Some(env_file) = config.backup.kopia_env_file.as_ref()
+                    && let Err(err) = load_backup_env_file(env_file)
+                {
+                    errors.push(format!("backup.kopiaEnvFile is invalid: {err:#}"));
+                }
+            }
+        }
     }
 
     if errors.is_empty() {
@@ -354,15 +393,27 @@ pub fn validate_config(config: &Config) -> Result<()> {
 }
 
 pub fn restic_environment_check_success_message(config: &Config) -> Option<String> {
-    has_backup_enabled_servers(config).then(|| {
-        if let Some(env_file) = config.backup.restic_env_file.as_ref() {
-            format!(
-                "Remote backup Restic environment variables valid using '{}'.",
-                env_file.display()
-            )
-        } else {
-            "Remote backup Restic environment variables valid using process environment."
-                .to_string()
+    has_backup_enabled_servers(config).then(|| match config.backup.provider.unwrap_or_default() {
+        RemoteBackupProviderConfig::Restic => {
+            if let Some(env_file) = config.backup.restic_env_file.as_ref() {
+                format!(
+                    "Remote backup Restic environment variables valid using '{}'.",
+                    env_file.display()
+                )
+            } else {
+                "Remote backup Restic environment variables valid using process environment."
+                    .to_string()
+            }
+        }
+        RemoteBackupProviderConfig::Kopia => {
+            if let Some(env_file) = config.backup.kopia_env_file.as_ref() {
+                format!(
+                    "Remote backup Kopia environment file parseable using '{}'.",
+                    env_file.display()
+                )
+            } else {
+                "Remote backup Kopia environment loaded from process environment.".to_string()
+            }
         }
     })
 }
@@ -386,7 +437,7 @@ fn notifications_enabled(notifications: &NotificationsConfig) -> bool {
 
 fn validate_restic_environment_config(backup: &BackupConfig, errors: &mut Vec<String>) {
     let entries = if let Some(env_file) = backup.restic_env_file.as_ref() {
-        match load_restic_env_file(env_file) {
+        match load_backup_env_file(env_file) {
             Ok(entries) => entries,
             Err(err) => {
                 errors.push(format!("backup.resticEnvFile is invalid: {err:#}"));
@@ -428,17 +479,17 @@ fn restic_missing_setting_message(setting: &str, env_file: Option<&PathBuf>) -> 
     }
 }
 
-fn load_restic_env_file(path: &Path) -> Result<Vec<(String, String)>> {
+fn load_backup_env_file(path: &Path) -> Result<Vec<(String, String)>> {
     let text = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read restic env file '{}'", path.display()))?;
+        .with_context(|| format!("Failed to read backup env file '{}'", path.display()))?;
 
     text.lines()
         .enumerate()
-        .filter_map(|(index, line)| parse_restic_env_line(path, index + 1, line).transpose())
+        .filter_map(|(index, line)| parse_backup_env_line(path, index + 1, line).transpose())
         .collect()
 }
 
-fn parse_restic_env_line(
+fn parse_backup_env_line(
     path: &Path,
     line_number: usize,
     line: &str,
@@ -469,7 +520,7 @@ fn parse_restic_env_line(
 
     Ok(Some((
         key.to_string(),
-        parse_restic_env_value(value.trim()),
+        parse_backup_env_value(value.trim()),
     )))
 }
 
@@ -479,7 +530,7 @@ fn is_valid_env_key(key: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn parse_restic_env_value(value: &str) -> String {
+fn parse_backup_env_value(value: &str) -> String {
     let value = strip_inline_comment(value).trim();
 
     if value.len() >= 2 {
@@ -1282,6 +1333,45 @@ mod tests {
             Some(Path::new(
                 "/home/blackshadow/.config/clserver/secrets/restic.env"
             ))
+        );
+    }
+
+    #[test]
+    fn parses_kopia_backup_config() {
+        let kopia_env = write_test_discord_env("kopia-config", "KOPIA_PASSWORD='secret'");
+        let config = parse_config(&format!(
+            r#"
+            [global]
+            serverDir = "/srv/servers"
+            logDir = "/var/log/clserver"
+
+            [backup]
+            provider = "kopia"
+            localDir = "/srv/backups"
+            kopiaEnvFile = "{}"
+
+            [java_environments]
+            default = "/usr/bin/java"
+
+            [servers.survival]
+            name = "survival"
+            type = "minecraft"
+            jarFile = "server.jar"
+            rconPort = 25575
+            rconPassword = "secret"
+            backup = true
+            "#,
+            kopia_env.display()
+        ));
+
+        validate_config(&config).expect("kopia backup config should be valid");
+        assert_eq!(
+            config.backup.provider,
+            Some(RemoteBackupProviderConfig::Kopia)
+        );
+        assert_eq!(
+            config.backup.kopia_env_file.as_deref(),
+            Some(kopia_env.as_path())
         );
     }
 

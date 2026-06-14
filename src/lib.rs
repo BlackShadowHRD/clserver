@@ -4,6 +4,7 @@ pub mod logging;
 mod notifications;
 mod paths;
 mod rcon;
+mod remote_backup;
 mod server;
 
 use anyhow::Result;

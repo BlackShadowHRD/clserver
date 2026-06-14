@@ -416,16 +416,24 @@ fn run_maintenance(config: &mut Config) -> Result<()> {
         "Configured servers: {total_servers}; backup enabled: {backup_enabled_servers}; enabled for restart: {enabled_servers}"
     );
 
+    let should_run_cleanup = config
+        .servers
+        .values()
+        .any(|server| server.backup.unwrap_or(false));
+
+    if should_run_cleanup {
+        log_maintenance_phase("remote backup provider validation");
+        restic_environment_status(&config.backup).context(
+            "Remote backup provider validation failed before maintenance changed server state",
+        )?;
+    }
+
     log_maintenance_phase("reconcile minecraft rcon passwords");
     reconcile_running_minecraft_servers(config)?;
 
     log_maintenance_phase("velocity pre-backend handling");
     handle_velocity_servers(config)?;
 
-    let should_run_cleanup = config
-        .servers
-        .values()
-        .any(|server| server.backup.unwrap_or(false));
     let tasks = build_maintenance_tasks(config)?;
     let task_count = tasks.len();
     let running_task_count = tasks.iter().filter(|task| task.was_running).count();
@@ -1037,7 +1045,7 @@ fn process_maintenance_task(task: MaintenanceTask) -> Result<()> {
     let server_name = task.server.server_name().to_string();
 
     if task.should_backup {
-        info!(id = %server_id, server = %server_name, "validating restic environment for backend backup");
+        info!(id = %server_id, server = %server_name, "validating remote backup provider for backend backup");
         task.server.validate_remote_backup_environment()?;
     }
 
@@ -1062,7 +1070,7 @@ fn process_maintenance_task(task: MaintenanceTask) -> Result<()> {
     if task.should_backup {
         info!(id = %server_id, server = %server_name, "starting backend local mirror backup");
         task.server.backup_server(BackupKind::Local)?;
-        info!(id = %server_id, server = %server_name, "starting backend remote restic backup");
+        info!(id = %server_id, server = %server_name, "starting backend remote backup");
         task.server.backup_server(BackupKind::Remote)?;
     } else {
         info!(id = %server_id, server = %server_name, "backend backup skipped because backup is disabled");

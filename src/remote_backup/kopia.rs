@@ -33,17 +33,23 @@ impl RemoteBackupProvider for KopiaRemoteBackupProvider<'_> {
     }
 
     fn validate_environment(&self) -> Result<()> {
-        let status = self
+        let output = self
             .command()?
             .arg("repository")
             .arg("status")
-            .status()
+            .output()
             .context("Failed to run 'kopia repository status'")?;
 
-        if !status.success() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             bail!(
-                "Kopia repository status failed. Return code: {:?}",
-                status.code()
+                "Kopia repository status failed. Return code: {:?}{}",
+                output.status.code(),
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
             );
         }
 
@@ -262,10 +268,26 @@ fn looks_like_date_time_prefix(value: &str) -> bool {
 }
 
 fn apply_kopia_env(command: &mut Command, env_file: Option<&Path>) -> Result<()> {
-    for (key, value) in env_entries(env_file)? {
+    for (key, value) in resolved_env_entries(env_file)? {
         command.env(key, value);
     }
     Ok(())
+}
+
+fn resolved_env_entries(env_file: Option<&Path>) -> Result<Vec<(String, String)>> {
+    let mut entries = env_entries(env_file)?;
+    if env_value(&entries, "KOPIA_PASSWORD").is_none()
+        && let Some(password_file) = env_value(&entries, "KOPIA_PASSWORD_FILE")
+    {
+        let password = fs::read_to_string(&password_file)
+            .with_context(|| format!("Failed to read KOPIA_PASSWORD_FILE '{}'", password_file))?;
+        entries.push((
+            "KOPIA_PASSWORD".to_string(),
+            password.trim_end().to_string(),
+        ));
+    }
+
+    Ok(entries)
 }
 
 fn env_entries(env_file: Option<&Path>) -> Result<Vec<(String, String)>> {
@@ -273,6 +295,13 @@ fn env_entries(env_file: Option<&Path>) -> Result<Vec<(String, String)>> {
         Some(env_file) => load_env_file(env_file),
         None => Ok(std::env::vars().collect()),
     }
+}
+
+fn env_value(entries: &[(String, String)], key: &str) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find_map(|(entry_key, value)| (entry_key == key).then(|| value.clone()))
 }
 
 fn load_env_file(path: &Path) -> Result<Vec<(String, String)>> {
@@ -388,6 +417,59 @@ mod tests {
             Some(("KOPIA_PASSWORD".to_string(), "secret".to_string()))
         );
         assert_eq!(parse_env_line(path, 2, "# comment")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_kopia_password_file() -> Result<()> {
+        let password_path = std::env::temp_dir().join(format!(
+            "clserver-kopia-password-{}.pwd",
+            std::process::id()
+        ));
+        fs::write(&password_path, "from-file\n")?;
+        let env_path = std::env::temp_dir().join(format!(
+            "clserver-kopia-password-file-{}.env",
+            std::process::id()
+        ));
+        fs::write(
+            &env_path,
+            format!("KOPIA_PASSWORD_FILE='{}'\n", password_path.display()),
+        )?;
+
+        let entries = resolved_env_entries(Some(&env_path))?;
+
+        assert_eq!(
+            env_value(&entries, "KOPIA_PASSWORD").as_deref(),
+            Some("from-file")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_kopia_password_takes_precedence_over_password_file() -> Result<()> {
+        let password_path = std::env::temp_dir().join(format!(
+            "clserver-kopia-password-precedence-{}.pwd",
+            std::process::id()
+        ));
+        fs::write(&password_path, "from-file\n")?;
+        let env_path = std::env::temp_dir().join(format!(
+            "clserver-kopia-password-precedence-{}.env",
+            std::process::id()
+        ));
+        fs::write(
+            &env_path,
+            format!(
+                "KOPIA_PASSWORD='explicit'\nKOPIA_PASSWORD_FILE='{}'\n",
+                password_path.display()
+            ),
+        )?;
+
+        let entries = resolved_env_entries(Some(&env_path))?;
+
+        assert_eq!(
+            env_value(&entries, "KOPIA_PASSWORD").as_deref(),
+            Some("explicit")
+        );
         Ok(())
     }
 }

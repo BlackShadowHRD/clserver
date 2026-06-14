@@ -60,6 +60,8 @@ impl RemoteBackupProvider for KopiaRemoteBackupProvider<'_> {
         self.validate_environment()?;
         info!(server = %context.server_name, source = %context.server_dir.display(), provider = self.name(), "starting remote backup");
 
+        let repository_size_before = self.repository_size_bytes().ok().flatten();
+
         let mut command = self.command()?;
         command
             .arg("snapshot")
@@ -76,12 +78,18 @@ impl RemoteBackupProvider for KopiaRemoteBackupProvider<'_> {
             .context("Failed to run 'kopia snapshot create' for remote server backup")?;
         replay_output(&output)?;
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let repository_size_after = self.repository_size_bytes().ok().flatten();
+        let bytes_added = parse_kopia_bytes_added(&stdout)
+            .or_else(|| parse_kopia_bytes_added(&stderr))
+            .or_else(|| repository_size_delta(repository_size_before, repository_size_after));
         let metrics = RemoteBackupMetrics {
             duration: output.metrics.duration,
             user_cpu: output.metrics.user_cpu,
             system_cpu: output.metrics.system_cpu,
             peak_memory_kib: output.metrics.peak_memory_kib,
-            bytes_added: None,
+            bytes_added,
         };
 
         if !output.status.success() {
@@ -231,6 +239,101 @@ impl RemoteBackupProvider for KopiaRemoteBackupProvider<'_> {
         );
         Ok(())
     }
+}
+
+impl KopiaRemoteBackupProvider<'_> {
+    fn repository_size_bytes(&self) -> Result<Option<u64>> {
+        let output = self
+            .command()?
+            .arg("content")
+            .arg("stats")
+            .arg("--raw")
+            .output()
+            .context("Failed to run 'kopia content stats --raw'")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "Kopia content stats failed. Return code: {:?}{}",
+                output.status.code(),
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_kopia_repository_size_bytes(&stdout))
+    }
+}
+
+fn repository_size_delta(before: Option<u64>, after: Option<u64>) -> Option<u64> {
+    after?.checked_sub(before?)
+}
+
+fn parse_kopia_bytes_added(output: &str) -> Option<u64> {
+    output.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if !(lower.contains("uploaded") || lower.contains("added")) {
+            return None;
+        }
+        parse_first_size(line)
+    })
+}
+
+fn parse_kopia_repository_size_bytes(output: &str) -> Option<u64> {
+    output.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("total") || lower.contains("content") || lower.contains("size") {
+            parse_first_integer(line).or_else(|| parse_first_size(line))
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_first_integer(line: &str) -> Option<u64> {
+    line.split(|ch: char| !(ch.is_ascii_digit() || ch == ','))
+        .filter(|part| !part.is_empty())
+        .find_map(|part| part.replace(',', "").parse::<u64>().ok())
+}
+
+fn parse_first_size(line: &str) -> Option<u64> {
+    let mut previous: Option<String> = None;
+    for token in line.split_whitespace() {
+        let normalized =
+            token.trim_matches(|ch: char| ch == ',' || ch == ':' || ch == '(' || ch == ')');
+        if let Some(amount) = previous.take()
+            && let Some(bytes) = parse_size_parts(&amount, normalized)
+        {
+            return Some(bytes);
+        }
+
+        if normalized
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || ch == '.' || ch == ',')
+        {
+            previous = Some(normalized.replace(',', ""));
+        }
+    }
+
+    None
+}
+
+fn parse_size_parts(amount: &str, unit: &str) -> Option<u64> {
+    let amount = amount.parse::<f64>().ok()?;
+    let multiplier = match unit {
+        "B" | "bytes" | "byte" => 1.0,
+        "KiB" | "KB" | "kB" => 1024.0,
+        "MiB" | "MB" => 1024.0 * 1024.0,
+        "GiB" | "GB" => 1024.0 * 1024.0 * 1024.0,
+        "TiB" | "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+
+    Some((amount * multiplier).round() as u64)
 }
 
 fn kopia_snapshot_source(snapshot: &str, include: &Path) -> String {
@@ -418,6 +521,28 @@ mod tests {
         );
         assert_eq!(parse_env_line(path, 2, "# comment")?, None);
         Ok(())
+    }
+
+    #[test]
+    fn parses_kopia_uploaded_size_from_output() {
+        assert_eq!(
+            parse_kopia_bytes_added("uploaded 12.5 MiB of data"),
+            Some((12.5 * 1024.0 * 1024.0) as u64)
+        );
+    }
+
+    #[test]
+    fn parses_kopia_added_size_from_output() {
+        assert_eq!(
+            parse_kopia_bytes_added("Added 1,024 KiB to repository"),
+            Some(1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn calculates_repository_size_delta() {
+        assert_eq!(repository_size_delta(Some(100), Some(175)), Some(75));
+        assert_eq!(repository_size_delta(Some(175), Some(100)), None);
     }
 
     #[test]
